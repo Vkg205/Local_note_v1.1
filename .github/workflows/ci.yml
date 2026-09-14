@@ -1,0 +1,115 @@
+name: LocalNote CI - Windows x64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-win-x64:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.401'
+
+      - name: Prepare diagnostics
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .\artifacts | Out-Null
+          dotnet --info | Out-File .\artifacts\dotnet-info.txt -Encoding utf8
+          dotnet --list-sdks | Out-File .\artifacts\dotnet-sdks.txt -Encoding utf8
+
+      - name: Validate repository
+        shell: pwsh
+        run: |
+          try {
+            & .\validate-project.ps1 2>&1 | Tee-Object -FilePath .\artifacts\validate.log
+          } catch {
+            $_ | Out-String | Tee-Object -FilePath .\artifacts\validate.log -Append
+            Write-Output "::error title=Repository validation failed::See validate.log in diagnostics artifact."
+            exit 1
+          }
+
+      # Deliberately build without a RuntimeIdentifier. This validates C#/XAML first
+      # without requiring self-contained runtime packs.
+      - name: Restore compile dependencies
+        shell: pwsh
+        run: |
+          & dotnet restore .\src\LocalNote.csproj 2>&1 | Tee-Object -FilePath .\artifacts\restore-build.log
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error title=Restore failed::See restore-build.log in diagnostics artifact."
+            exit $LASTEXITCODE
+          }
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          & dotnet build .\src\LocalNote.csproj -c Release --no-restore -p:ContinuousIntegrationBuild=true -bl:.\artifacts\LocalNote-build.binlog 2>&1 | Tee-Object -FilePath .\artifacts\build.log
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error title=Compile failed::See build.log and LocalNote-build.binlog in diagnostics artifact."
+            exit $LASTEXITCODE
+          }
+
+      # Do NOT use --no-restore here. Publish must be allowed to restore the
+      # Microsoft.NETCore.App.Runtime.win-x64 and WindowsDesktop runtime packs.
+      - name: Publish self-contained win-x64 EXE
+        shell: pwsh
+        run: |
+          if (Test-Path .\dist\win-x64) { Remove-Item .\dist\win-x64 -Recurse -Force }
+          & dotnet publish .\src\LocalNote.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false -p:ContinuousIntegrationBuild=true -bl:.\artifacts\LocalNote-publish.binlog -o .\dist\win-x64 2>&1 | Tee-Object -FilePath .\artifacts\publish.log
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error title=Publish failed::See publish.log and LocalNote-publish.binlog in diagnostics artifact."
+            exit $LASTEXITCODE
+          }
+
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          $exe = '.\dist\win-x64\LocalNote.exe'
+          if (!(Test-Path $exe)) {
+            Write-Output "::error title=Output verification failed::LocalNote.exe was not produced."
+            throw 'LocalNote.exe was not produced.'
+          }
+          $item = Get-Item $exe
+          "EXE=$($item.FullName)" | Tee-Object -FilePath .\artifacts\output.txt
+          "SIZE=$($item.Length)" | Tee-Object -FilePath .\artifacts\output.txt -Append
+
+      - name: Package Windows build
+        shell: pwsh
+        run: |
+          $zip = '.\artifacts\LocalNote-win-x64.zip'
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path .\dist\win-x64\* -DestinationPath $zip -Force
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v7
+        with:
+          name: LocalNote-win-x64-${{ github.sha }}
+          path: artifacts/LocalNote-win-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: LocalNote-build-diagnostics-${{ github.run_id }}
+          path: |
+            artifacts/*.txt
+            artifacts/*.log
+            artifacts/*.binlog
+          if-no-files-found: ignore
+          retention-days: 7
