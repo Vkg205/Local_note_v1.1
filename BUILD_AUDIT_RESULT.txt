@@ -1,0 +1,36 @@
+LocalNote V0.7.6 pre-package audit
+================================
+PASS repository required files
+PASS src flattened layout (no subdirectories)
+PASS XML/XAML/csproj/props/manifest parsing
+PASS XAML x:Class -> code-behind mapping
+PASS XAML event handlers resolved (100 references)
+PASS StaticResource references resolved (142 references)
+PASS duplicate declared type scan
+PASS TargetFramework net10.0-windows
+PASS UseWPF=true
+PASS EnableWindowsTargeting=true
+PASS PlatformTarget=x64
+PASS ImplicitUsings=enable
+PASS Nullable=enable
+PASS GlobalUsings foundation
+PASS LocalNote.sln project path
+PASS global.json SDK 10.0.401
+PASS ci.yml YAML parse
+PASS release.yml YAML parse
+PASS CI is workflow_dispatch only
+PASS normal compile restore has no RID dependency
+PASS normal Release build has no RID dependency
+PASS publish uses -r win-x64 and --self-contained true
+PASS publish deliberately DOES NOT use --no-restore
+PASS CI diagnostics are uploaded even after failures
+PASS local publish script allows runtime-pack restore
+PASS BUILD_LOCALNOTE.cmd allows runtime-pack restore
+PASS Windows CMD CRLF line endings
+PASS application ICO signature
+PASS SQLite schema creation smoke test
+PASS SQLite FTS5 MATCH smoke test
+PASS notebook -> section -> page -> object insert smoke test
+
+Known environment limitation:
+A real WPF/.NET build cannot run in the current Linux container because the .NET SDK / Windows WPF build toolchain is not installed. GitHub Actions on windows-latest remains the authoritative compile gate.
