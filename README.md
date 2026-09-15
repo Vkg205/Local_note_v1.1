@@ -1,21 +1,28 @@
-# LocalNote V0.7.6
+# LocalNote V0.8.2 UX Cleanup
 
-Windows x64 local OneNote-style notebook prototype.
+Windows x64 本地 OneNote 类自由笔记工具。当前版本重点不是继续增加高学习成本分支，而是收敛核心编辑体验。
 
-## GitHub build
+## V0.8.2 重点
 
-Run **Actions → LocalNote CI - Windows x64 → Run workflow**.
+- Ribbon 改为 **展开 / 紧凑 / 隐藏** 三态，不再允许把工具栏拖到不可用高度。
+- UI 统一使用“本地仓库”术语，Notebook 仅表示“笔记本”。
+- 去除重复的当前笔记本信息卡，页面操作移动到页面本身的 `…` 菜单。
+- 新建笔记本自动创建“快速笔记 + 无标题页”；新建分区自动创建空白页；新建页自动聚焦标题。
+- 记住上次使用的笔记本 / 分区 / 页面并在下次打开时恢复。
+- `Space + 左键拖动` 平移画布；Ctrl+滚轮按鼠标位置缩放。
+- 内容块取消固定顶部拖动栏，支持边缘直接拖动，Resize 点击区域更大；文本块高度随内容增长。
+- 增加跨对象 Undo/Redo 基础：对象移动/缩放、Shape、Ink、表格命令、删除/复制等进入统一历史。
+- Todo 统一为**文本段落级待办**，不再保留对象级 Todo 交互；勾选状态持久化并显示完成删除线。
+- 状态栏区分普通/处理中/成功/失败，并把保存状态独立显示。
+- Shape 交互重构：
+  - 默认 Shape 直接创建在页面绘图层，与 Ink 属于同一绘图语义，不再生成一个独立内容卡片。
+  - 从文本块 / 表格 / 图片内部开始拖动时，Shape 创建为该内容对象的子图形，随父对象移动。
+  - Shape 类型选择不会自动进入绘制模式；点击“形状”工具后绘制一次，完成后自动返回选择模式。
 
-The build pipeline performs:
+## 编译
 
-1. repository validation
-2. normal .NET restore
-3. Release compile
-4. win-x64 self-contained single-file publish (with runtime-pack restore enabled)
-5. EXE verification
-6. ZIP artifact upload
-7. diagnostics upload
+本机：双击 `BUILD_LOCALNOTE.cmd`。
 
-Output: `LocalNote-win-x64-<commit>.zip`.
+GitHub Web：上传完整仓库后，进入 `Actions -> LocalNote CI - Windows x64 -> Run workflow`。
 
-See `BUILD_AUDIT_V0_7_6.md` and `GITHUB_WEB_UPLOAD_GUIDE.md`.
+目标输出：`dist/win-x64/LocalNote.exe`。

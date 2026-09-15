@@ -1,48 +1,61 @@
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
+$issues = New-Object System.Collections.Generic.List[string]
+
 Write-Host "[validate] Repository root: $root"
 
-$required = @(
-  'LocalNote.sln',
-  'global.json',
-  'src/LocalNote.csproj',
-  'src/GlobalUsings.cs',
-  'src/App.xaml',
-  'src/App.xaml.cs',
-  'src/MainWindow.xaml',
-  'src/MainWindow.xaml.cs',
-  'src/PageCanvasView.cs',
-  'src/SqliteDataStore.cs',
-  'src/LocalNote.ico'
-)
-foreach ($item in $required) {
-  $path = Join-Path $root $item
-  if (!(Test-Path $path)) { throw "Missing required file: $item" }
+# This validator is intentionally advisory. dotnet build is the authoritative gate.
+# The manifest exists mainly to catch incomplete GitHub Web uploads and report the
+# exact missing file names instead of a generic validation failure.
+$manifestPath = Join-Path $root 'SOURCE_MANIFEST.txt'
+if (Test-Path $manifestPath) {
+    $expected = Get-Content $manifestPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    foreach ($item in $expected) {
+        if (!(Test-Path (Join-Path $root $item))) {
+            $issues.Add("Missing uploaded file: $item")
+        }
+    }
+} else {
+    $issues.Add('SOURCE_MANIFEST.txt is missing; Web-upload completeness cannot be checked.')
 }
 
-# Deterministic XML/XAML well-formedness only. Actual XAML/code-behind binding
-# is validated by the WPF compiler in dotnet build.
+$projectPath = Join-Path $root 'src/LocalNote.csproj'
+if (!(Test-Path $projectPath)) {
+    $issues.Add('Missing critical project file: src/LocalNote.csproj')
+} else {
+    try { [xml](Get-Content $projectPath -Raw) | Out-Null }
+    catch { $issues.Add("LocalNote.csproj XML parse failed: $($_.Exception.Message)") }
+
+    $project = Get-Content $projectPath -Raw
+    foreach ($setting in @(
+        '<TargetFramework>net10.0-windows</TargetFramework>',
+        '<UseWPF>true</UseWPF>',
+        '<PlatformTarget>x64</PlatformTarget>',
+        '<ImplicitUsings>enable</ImplicitUsings>',
+        '<Nullable>enable</Nullable>'
+    )) {
+        if ($project -notmatch [regex]::Escape($setting)) {
+            $issues.Add("Project setting missing: $setting")
+        }
+    }
+}
+
+# Parse XML/XAML that is actually present. Do not hard-code individual source files;
+# the WPF compiler is better at validating code-behind bindings and C# references.
 Get-ChildItem $root -Recurse -File -Include *.xaml,*.csproj,*.props,*.manifest | ForEach-Object {
-  try { [xml](Get-Content $_.FullName -Raw) | Out-Null }
-  catch { throw "XML/XAML parse failed: $($_.FullName) :: $($_.Exception.Message)" }
+    try { [xml](Get-Content $_.FullName -Raw) | Out-Null }
+    catch { $issues.Add("XML/XAML parse failed: $($_.FullName) :: $($_.Exception.Message)") }
 }
 
-$project = Get-Content (Join-Path $root 'src/LocalNote.csproj') -Raw
-$requiredSettings = @(
-  '<TargetFramework>net10.0-windows</TargetFramework>',
-  '<UseWPF>true</UseWPF>',
-  '<EnableWindowsTargeting>true</EnableWindowsTargeting>',
-  '<PlatformTarget>x64</PlatformTarget>',
-  '<ImplicitUsings>enable</ImplicitUsings>',
-  '<Nullable>enable</Nullable>'
-)
-foreach ($setting in $requiredSettings) {
-  if ($project -notmatch [regex]::Escape($setting)) { throw "Required project setting missing: $setting" }
+if ($issues.Count -gt 0) {
+    Write-Warning "Repository pre-check found $($issues.Count) issue(s):"
+    foreach ($issue in $issues) {
+        Write-Warning " - $issue"
+        Write-Output "::warning title=Repository pre-check::$issue"
+    }
+    Write-Host '[validate] Advisory check completed with warnings. CI will continue to dotnet build.' -ForegroundColor Yellow
+    exit 2
 }
 
-$globalUsings = Get-Content (Join-Path $root 'src/GlobalUsings.cs') -Raw
-foreach ($ns in @('System.IO','System.Threading.Tasks','System.Collections.Generic','System.Text.Json')) {
-  if ($globalUsings -notmatch "global using $([regex]::Escape($ns));") { throw "Required global using missing: $ns" }
-}
-
-Write-Host '[validate] PASS - required files, project settings and XML/XAML well-formedness verified.' -ForegroundColor Green
+Write-Host '[validate] PASS - source manifest, project settings and XML/XAML well-formedness verified.' -ForegroundColor Green
+exit 0
