@@ -2,8 +2,8 @@
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="44"/>
-            <RowDefinition x:Name="RibbonRow" Height="112" MinHeight="106" MaxHeight="170"/>
-            <RowDefinition Height="4"/>
+            <RowDefinition x:Name="RibbonRow" Height="106" MinHeight="0" MaxHeight="106"/>
+            <RowDefinition Height="1"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="26"/>
         </Grid.RowDefinitions>
@@ -63,7 +63,7 @@
                 </Grid>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button x:Name="RibbonCompactButton" Style="{StaticResource TopBarButton}" Content="⌃ 工具" Click="ToggleRibbon_Click" ToolTip="折叠/展开工具栏；也可拖动下方分隔线调整高度"/>
+                    <Button x:Name="RibbonCompactButton" Style="{StaticResource TopBarButton}" Content="⌃ 工具" Click="ToggleRibbon_Click" ToolTip="切换工具栏：展开 / 紧凑 / 隐藏"/>
                     <Button x:Name="PagesPaneButton" Style="{StaticResource TopBarButton}" Content="▤ 页面" Click="TogglePagesPane_Click" ToolTip="显示/隐藏页面列表"/>
                     <Button x:Name="FocusModeButton" Style="{StaticResource TopBarButton}" Content="⛶ 专注" Click="ToggleFocusMode_Click" ToolTip="专注模式：尽量把空间留给画布"/>
                     <Button Style="{StaticResource TopBarButton}" Content="⟳" Click="Backup_Click" ToolTip="创建本地备份"/>
@@ -174,14 +174,6 @@
                                 </StackPanel>
                                 <TextBlock Text="页面内容" Grid.Row="1" Style="{StaticResource RibbonGroupLabel}"/>
                             </Grid></Border>
-                        <Border Style="{StaticResource RibbonGroupBorder}">
-                            <Grid><Grid.RowDefinitions><RowDefinition Height="*" MinHeight="42"/><RowDefinition Height="18"/></Grid.RowDefinitions><StackPanel Orientation="Horizontal" Grid.Row="0" VerticalAlignment="Center">
-                                    <Button Style="{StaticResource CommandButton}" Content="↗ 移动页面" Click="MovePage_Click"/>
-                                    <Button Style="{StaticResource CommandButton}" Content="⧉ 复制页面" Click="CopyPage_Click"/>
-                                    <Button Style="{StaticResource CommandButton}" Content="⌃ 置顶" Click="PinPage_Click"/>
-                                </StackPanel>
-                                <TextBlock Text="页面" Grid.Row="1" Style="{StaticResource RibbonGroupLabel}"/>
-                            </Grid></Border>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
@@ -197,6 +189,7 @@
                                     <ToggleButton x:Name="HighlighterToolToggle" Style="{StaticResource RibbonToolToggle}" Content="▰ 荧光笔" Click="HighlighterTool_Click"/>
                                     <ToggleButton x:Name="EraserToolToggle" Style="{StaticResource RibbonToolToggle}" Content="⌫ 橡皮" Click="EraserTool_Click"/>
                                     <ToggleButton x:Name="InkSelectToolToggle" Style="{StaticResource RibbonToolToggle}" Content="⌁ 套索" Click="InkSelectTool_Click"/>
+                                    <ToggleButton x:Name="ShapeToolToggle" Style="{StaticResource RibbonToolToggle}" Content="◇ 形状" Click="ShapeTool_Click" ToolTip="选择形状类型后，点击此工具并在画布拖动绘制"/>
                                 </StackPanel>
                                 <TextBlock Text="工具" Grid.Row="1" Style="{StaticResource RibbonGroupLabel}"/>
                             </Grid></Border>
@@ -215,7 +208,7 @@
                             </Grid></Border>
                         <Border Style="{StaticResource RibbonGroupBorder}">
                             <Grid><Grid.RowDefinitions><RowDefinition Height="*" MinHeight="42"/><RowDefinition Height="18"/></Grid.RowDefinitions><StackPanel Orientation="Horizontal" VerticalAlignment="Center" Grid.Row="0">
-                                    <ComboBox x:Name="ShapeKindCombo" MinWidth="140" Style="{StaticResource ToolbarCombo}" SelectedIndex="2" SelectionChanged="ShapeKindCombo_SelectionChanged" ToolTip="选择形状；然后在画布空白区域按住并拖动绘制">
+                                    <ComboBox x:Name="ShapeKindCombo" MinWidth="140" Style="{StaticResource ToolbarCombo}" SelectedIndex="2" SelectionChanged="ShapeKindCombo_SelectionChanged" ToolTip="选择形状类型；不会自动切换工具，点击左侧“形状”后开始绘制">
                                         <ComboBoxItem Content="直线" Tag="Line"/><ComboBoxItem Content="箭头" Tag="Arrow"/><ComboBoxItem Content="矩形" Tag="Rectangle"/>
                                         <ComboBoxItem Content="圆角矩形" Tag="RoundedRectangle"/><ComboBoxItem Content="椭圆" Tag="Ellipse"/><ComboBoxItem Content="三角形" Tag="Triangle"/>
                                         <ComboBoxItem Content="菱形" Tag="Diamond"/><ComboBoxItem Content="流程框" Tag="Flowchart"/>
@@ -261,7 +254,7 @@
                                     <Button Style="{StaticResource CommandButton}" Content="⌃ 工具" Click="ToggleRibbon_Click" ToolTip="折叠/展开工具栏"/>
                                     <Button Style="{StaticResource CommandButton}" Content="⛶ 专注" Click="ToggleFocusMode_Click" ToolTip="F11 专注模式"/>
                                 </StackPanel>
-                                <TextBlock Text="界面布局 · 分隔线可拖动" Grid.Row="1" Style="{StaticResource RibbonGroupLabel}"/>
+                                <TextBlock Text="界面布局" Grid.Row="1" Style="{StaticResource RibbonGroupLabel}"/>
                             </Grid></Border>
                     </StackPanel>
                 </ScrollViewer>
@@ -314,7 +307,7 @@
                 </ScrollViewer>
             </TabItem>
         </TabControl>
-        <GridSplitter x:Name="RibbonSplitter" Grid.Row="2" Height="4" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" ResizeDirection="Rows" ResizeBehavior="PreviousAndNext" Background="#ECE8EF" Cursor="SizeNS" ToolTip="拖动调整工具栏高度"/>
+        <Border x:Name="RibbonSplitter" Grid.Row="2" Height="1" Background="#E8E3EC" IsHitTestVisible="False"/>
 
         <!-- Workspace: notebooks on the left, horizontal section tabs, page list, canvas -->
         <Grid Grid.Row="3">
@@ -326,12 +319,6 @@
 
             <Border Grid.RowSpan="2" Grid.Column="0" x:Name="NavigationPanel" Background="#F8F7FA" BorderBrush="{DynamicResource BorderBrushLocal}" BorderThickness="0,0,1,0" IsEnabled="{Binding IsVaultOpen}">
                 <DockPanel Margin="10,12">
-                    <Border DockPanel.Dock="Top" Background="White" BorderBrush="{DynamicResource BorderBrushLocal}" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,10">
-                        <StackPanel>
-                            <TextBlock Text="当前笔记本" FontSize="10.5" Foreground="{DynamicResource TextTertiaryBrush}"/>
-                            <TextBlock Text="{Binding SelectedNotebook.Name, TargetNullValue=未选择}" Margin="0,3,0,0" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-                        </StackPanel>
-                    </Border>
                     <Grid DockPanel.Dock="Top" Margin="3,0,3,6">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <TextBlock Text="笔记本" FontWeight="SemiBold" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
@@ -388,15 +375,7 @@
                         </StackPanel>
                         <Button Grid.Column="1" Style="{StaticResource PrimaryButton}" Content="＋ 新建页" Command="{Binding AddPageCommand}"/>
                     </Grid>
-                    <Border DockPanel.Dock="Bottom" BorderBrush="{DynamicResource BorderBrushLocal}" BorderThickness="0,1,0,0" Padding="3,8,3,0" Margin="0,8,0,0">
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                            <Button Style="{StaticResource NavActionButton}" Content="⌃" Click="PinPage_Click" ToolTip="置顶/取消置顶"/>
-                            <Button Style="{StaticResource NavActionButton}" Content="↗" Click="MovePage_Click" ToolTip="移动页面"/>
-                            <Button Style="{StaticResource NavActionButton}" Content="⧉" Click="CopyPage_Click" ToolTip="复制页面"/>
-                            <Button Style="{StaticResource NavActionButton}" Content="×" Command="{Binding DeletePageCommand}" ToolTip="删除页面"/>
-                        </StackPanel>
-                    </Border>
-                    <ListBox ItemsSource="{Binding Pages}" SelectedItem="{Binding SelectedPage}" ItemContainerStyle="{StaticResource PageListItem}">
+                    <ListBox x:Name="PageList" ItemsSource="{Binding Pages}" SelectedItem="{Binding SelectedPage}" ItemContainerStyle="{StaticResource PageListItem}" PreviewMouseRightButtonDown="PageList_PreviewMouseRightButtonDown">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <Grid>
@@ -408,9 +387,12 @@
                                         <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                                         <TextBlock Text="{Binding UpdatedAt, StringFormat={}{0:MM-dd HH:mm}}" FontSize="10.5" Foreground="{DynamicResource TextTertiaryBrush}" Margin="0,4,0,0"/>
                                     </StackPanel>
-                                    <TextBlock Grid.Column="2" Text="★" Foreground="#D99A17" Margin="6,0,2,0" VerticalAlignment="Top">
-                                        <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding IsPinned}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
-                                    </TextBlock>
+                                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Top">
+                                        <TextBlock Text="★" Foreground="#D99A17" Margin="4,2,2,0">
+                                            <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding IsPinned}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
+                                        </TextBlock>
+                                        <Button Content="⋯" Style="{StaticResource NavActionButton}" Padding="5,0" Margin="2,0,0,0" Click="PageMore_Click" ToolTip="页面操作"/>
+                                    </StackPanel>
                                 </Grid>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
@@ -451,8 +433,8 @@
                     <Grid>
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                         <Border Width="58" Height="58" Background="{DynamicResource AccentBrush}" CornerRadius="14" HorizontalAlignment="Left"><TextBlock Text="L" Foreground="White" FontSize="31" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
-                        <StackPanel Grid.Row="1" Margin="0,20,0,0"><TextBlock Text="欢迎使用 LocalNote" FontSize="29" FontWeight="SemiBold"/><TextBlock Text="纯本地、自由画布的 Windows 数字笔记本。创建或打开一个 Vault 后即可开始。" FontSize="14" Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,8,0,0" LineHeight="22"/></StackPanel>
-                        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,26,0,0"><Button Style="{StaticResource PrimaryButton}" Content="＋ 创建本地笔记本" Command="{Binding CreateVaultCommand}" MinWidth="170"/><Button Style="{StaticResource CommandButton}" Content="打开已有 Vault…" Command="{Binding OpenVaultCommand}" Margin="10,2,2,2" MinWidth="150"/></StackPanel>
+                        <StackPanel Grid.Row="1" Margin="0,20,0,0"><TextBlock Text="欢迎使用 LocalNote" FontSize="29" FontWeight="SemiBold"/><TextBlock Text="纯本地、自由画布的 Windows 数字笔记本。创建或打开一个本地仓库后即可开始。" FontSize="14" Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,8,0,0" LineHeight="22"/></StackPanel>
+                        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,26,0,0"><Button Style="{StaticResource PrimaryButton}" Content="＋ 创建本地仓库" Command="{Binding CreateVaultCommand}" MinWidth="170"/><Button Style="{StaticResource CommandButton}" Content="打开已有仓库…" Command="{Binding OpenVaultCommand}" Margin="10,2,2,2" MinWidth="150"/></StackPanel>
                         <Border Grid.Row="3" Background="#F8F5FA" CornerRadius="10" Padding="13" Margin="0,24,0,0"><TextBlock Text="数据只保存在你选择的本机目录。LocalNote 不要求账号，也不会自动上传笔记。" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" TextWrapping="Wrap"/></Border>
                     </Grid>
                 </Border>
@@ -463,8 +445,8 @@
         <Border x:Name="StatusBarBorder" Grid.Row="4" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrushLocal}" BorderThickness="0,1,0,0">
             <Grid Margin="12,0">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Center"><Ellipse Width="7" Height="7" Fill="{DynamicResource SuccessBrush}" Margin="0,0,7,0"/><TextBlock Text="{Binding StatusText}" FontSize="11.5" Foreground="{DynamicResource TextSecondaryBrush}" TextTrimming="CharacterEllipsis"/></StackPanel>
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"><TextBlock x:Name="SelectionStatusText" Text="未选择对象" FontSize="11.5" Foreground="{DynamicResource TextTertiaryBrush}" Margin="0,0,16,0"/><TextBlock Text="Windows x64 · 本地优先 · 自动保存" FontSize="11.5" Foreground="{DynamicResource TextTertiaryBrush}"/></StackPanel>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center"><Ellipse x:Name="StatusIndicator" Width="7" Height="7" Fill="#9CA3AF" Margin="0,0,7,0"/><TextBlock x:Name="StatusTextBlock" Text="{Binding StatusText}" FontSize="11.5" Foreground="{DynamicResource TextSecondaryBrush}" TextTrimming="CharacterEllipsis"/></StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"><TextBlock x:Name="SaveStatusText" Text="已保存" FontSize="11.5" Foreground="{DynamicResource TextTertiaryBrush}" Margin="0,0,16,0"/><TextBlock x:Name="SelectionStatusText" Text="未选择对象" FontSize="11.5" Foreground="{DynamicResource TextTertiaryBrush}"/></StackPanel>
             </Grid>
         </Border>
     </Grid>

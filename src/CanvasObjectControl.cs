@@ -11,146 +11,190 @@ namespace LocalNote.App.Controls;
 public sealed class CanvasObjectControl : ContentControl
 {
     private readonly Border _border;
-    private readonly Grid _header;
-    private readonly TextBlock _grip;
-    private readonly Thumb _moveThumb;
-    private readonly Thumb _resizeThumb;
-    private readonly CheckBox _todoCheck;
+    private readonly Grid _root;
+    private readonly Grid _interactionLayer;
     private readonly TextBlock _importantBadge;
-    private bool _suppressTagEvent;
+    private readonly List<Thumb> _resizeThumbs = [];
+    private readonly List<Thumb> _moveThumbs = [];
     private bool _isSelected;
+    private bool _hover;
     private readonly double _minWidth;
     private readonly double _minHeight;
+    private readonly bool _autoHeight;
 
     public CanvasObjectControl(ContentObject model, UIElement content)
     {
         Model = model;
         (_minWidth, _minHeight) = model.Type switch
         {
-            ContentObjectType.Shape => (30d, 24d),
-            ContentObjectType.Attachment => (180d, 70d),
+            ContentObjectType.Attachment => (180d, 64d),
             ContentObjectType.Table => (220d, 120d),
-            _ => (140d, 80d)
+            _ => (140d, 56d)
         };
+        _autoHeight = model.Type == ContentObjectType.Text;
         Width = Math.Max(_minWidth, model.Width);
-        Height = Math.Max(_minHeight, model.Height);
+        if (!_autoHeight) Height = Math.Max(_minHeight, model.Height);
+        MinHeight = _minHeight;
         Focusable = true;
 
-        var root = new Grid();
-        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(24) });
-        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        _root = new Grid { Background = Brushes.Transparent };
+        _root.Children.Add(content);
 
-        _header = new Grid { Background = Brushes.Transparent };
-        _header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        _header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        _moveThumb = new Thumb { Cursor = Cursors.SizeAll, Background = Brushes.Transparent, ToolTip = "拖动内容块" };
-        _header.Children.Add(_moveThumb);
-
-        _grip = new TextBlock
+        // Child drawing layer. Shapes created while the pointer starts inside this
+        // content object are hosted here and therefore move with the parent object.
+        OverlayLayer = new Canvas
         {
-            Text = "⠿", Foreground = new SolidColorBrush(Color.FromRgb(124, 113, 132)), FontSize = 14,
-            Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center,
-            IsHitTestVisible = false, Opacity = 0
+            Background = null,
+            IsHitTestVisible = false,
+            ClipToBounds = true
         };
-        _header.Children.Add(_grip);
+        _root.Children.Add(OverlayLayer);
 
-        var badges = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center };
-        _importantBadge = new TextBlock { Text = "★", Foreground = new SolidColorBrush(Color.FromRgb(218, 145, 22)), FontSize = 13, Margin = new Thickness(3, 0, 5, 0) };
-        _todoCheck = new CheckBox { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(2, 0, 2, 0), ToolTip = "待办状态" };
-        _todoCheck.Checked += TodoCheck_Changed;
-        _todoCheck.Unchecked += TodoCheck_Changed;
-        badges.Children.Add(_importantBadge);
-        badges.Children.Add(_todoCheck);
-        Grid.SetColumn(badges, 1);
-        _header.Children.Add(badges);
-        Grid.SetRow(_header, 0);
-        root.Children.Add(_header);
+        _interactionLayer = new Grid { Background = null };
+        _root.Children.Add(_interactionLayer);
 
-        var host = new Grid { Background = Brushes.Transparent, Margin = new Thickness(3, 0, 3, 3) };
-        host.Children.Add(content);
-        Grid.SetRow(host, 1);
-        root.Children.Add(host);
-
-        _resizeThumb = new Thumb
+        _importantBadge = new TextBlock
         {
-            Width = 11, Height = 11, Cursor = Cursors.SizeNWSE,
-            HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom,
-            Background = new SolidColorBrush(Color.FromRgb(107, 33, 168)), BorderThickness = new Thickness(0),
-            Margin = new Thickness(0, 0, 3, 3), Visibility = Visibility.Collapsed
+            Text = "★",
+            Foreground = new SolidColorBrush(Color.FromRgb(218, 145, 22)),
+            FontSize = 13,
+            Margin = new Thickness(0, 4, 6, 0),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Top,
+            IsHitTestVisible = false,
+            Visibility = Visibility.Collapsed
         };
-        Grid.SetRow(_resizeThumb, 1);
-        root.Children.Add(_resizeThumb);
+        _interactionLayer.Children.Add(_importantBadge);
 
-        var isFloating = model.Type is ContentObjectType.Text or ContentObjectType.Shape;
+        AddMoveThumbs();
+        AddResizeThumbs();
+
+        var isFloating = model.Type == ContentObjectType.Text;
         _border = new Border
         {
-            CornerRadius = new CornerRadius(8),
+            CornerRadius = new CornerRadius(isFloating ? 4 : 8),
             BorderThickness = new Thickness(1),
             BorderBrush = Brushes.Transparent,
             Background = isFloating ? Brushes.Transparent : Brushes.White,
-            Child = root,
+            Child = _root,
             Padding = new Thickness(0),
             SnapsToDevicePixels = true,
             Effect = isFloating ? null : new DropShadowEffect { BlurRadius = 12, ShadowDepth = 2, Opacity = 0.08, Color = Colors.Black }
         };
         base.Content = _border;
 
-        _moveThumb.DragDelta += MoveThumb_DragDelta;
-        _moveThumb.DragCompleted += (_, _) => { SnapPosition(); Changed?.Invoke(this, EventArgs.Empty); };
-        _resizeThumb.DragDelta += ResizeThumb_DragDelta;
-        _resizeThumb.DragCompleted += (_, _) => Changed?.Invoke(this, EventArgs.Empty);
         PreviewMouseLeftButtonDown += (_, _) => Activated?.Invoke(this, EventArgs.Empty);
-        MouseEnter += (_, _) => UpdateHover(true);
-        MouseLeave += (_, _) => UpdateHover(false);
+        MouseEnter += (_, _) => { _hover = true; UpdateVisualState(); };
+        MouseLeave += (_, _) => { _hover = false; UpdateVisualState(); };
+        SizeChanged += (_, _) =>
+        {
+            if (_autoHeight && ActualHeight > 0)
+            {
+                Model.Width = ActualWidth > 0 ? ActualWidth : Width;
+                Model.Height = Math.Max(_minHeight, ActualHeight);
+                OverlayLayer.Width = Math.Max(0, ActualWidth);
+                OverlayLayer.Height = Math.Max(0, ActualHeight);
+            }
+        };
 
         RefreshTagVisuals();
         IsSelected = false;
     }
 
     public ContentObject Model { get; }
-    public bool SnapToGrid { get; set; } = true;
+    public Canvas OverlayLayer { get; }
+    public bool SnapToGrid { get; set; } = false;
     public double SnapSize { get; set; } = 8;
     public event EventHandler? Changed;
     public event EventHandler? Activated;
-    public event EventHandler? TagsChanged;
+    public event EventHandler? ObjectManipulationStarted;
 
     public bool IsSelected
     {
-        set
-        {
-            _isSelected = value;
-            _border.BorderBrush = value ? new SolidColorBrush(Color.FromRgb(126, 34, 206)) : Brushes.Transparent;
-            _border.BorderThickness = value ? new Thickness(1.5) : new Thickness(1);
-            _resizeThumb.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
-            _header.Background = value ? new SolidColorBrush(Color.FromRgb(247, 239, 252)) : Brushes.Transparent;
-            _grip.Opacity = value ? 1 : 0;
-        }
+        get => _isSelected;
+        set { _isSelected = value; UpdateVisualState(); }
     }
 
     public void RefreshTagVisuals()
     {
-        _suppressTagEvent = true;
         _importantBadge.Visibility = Model.IsImportant ? Visibility.Visible : Visibility.Collapsed;
-        _todoCheck.Visibility = Model.IsTodo ? Visibility.Visible : Visibility.Collapsed;
-        _todoCheck.IsChecked = Model.TodoCompleted;
-        Opacity = Model.IsTodo && Model.TodoCompleted ? 0.68 : 1.0;
-        _suppressTagEvent = false;
     }
 
-    private void UpdateHover(bool hover)
+    private void AddMoveThumbs()
     {
-        if (_isSelected) return;
-        _header.Background = hover ? new SolidColorBrush(Color.FromArgb(150, 248, 245, 250)) : Brushes.Transparent;
-        _grip.Opacity = hover ? 0.78 : 0;
-        _border.BorderBrush = hover ? new SolidColorBrush(Color.FromRgb(226, 218, 231)) : Brushes.Transparent;
+        // Thin edge strips provide OneNote-like direct movement without reserving a
+        // permanent 24px header inside every content object.
+        _moveThumbs.Add(CreateMoveThumb(HorizontalAlignment.Stretch, VerticalAlignment.Top, double.NaN, 9, Cursors.SizeAll));
+        _moveThumbs.Add(CreateMoveThumb(HorizontalAlignment.Left, VerticalAlignment.Stretch, 7, double.NaN, Cursors.SizeAll));
+        _moveThumbs.Add(CreateMoveThumb(HorizontalAlignment.Right, VerticalAlignment.Stretch, 7, double.NaN, Cursors.SizeAll));
+        foreach (var thumb in _moveThumbs) _interactionLayer.Children.Add(thumb);
     }
 
-    private void TodoCheck_Changed(object sender, RoutedEventArgs e)
+    private Thumb CreateMoveThumb(HorizontalAlignment h, VerticalAlignment v, double width, double height, Cursor cursor)
     {
-        if (_suppressTagEvent || !Model.IsTodo) return;
-        Model.TodoCompleted = _todoCheck.IsChecked == true;
-        Opacity = Model.TodoCompleted ? 0.68 : 1.0;
-        TagsChanged?.Invoke(this, EventArgs.Empty);
+        var thumb = new Thumb
+        {
+            HorizontalAlignment = h,
+            VerticalAlignment = v,
+            Background = Brushes.Transparent,
+            Cursor = cursor,
+            ToolTip = "拖动内容块",
+            Opacity = 1
+        };
+        if (!double.IsNaN(width)) thumb.Width = width;
+        if (!double.IsNaN(height)) thumb.Height = height;
+        thumb.DragStarted += (_, _) => ObjectManipulationStarted?.Invoke(this, EventArgs.Empty);
+        thumb.DragDelta += MoveThumb_DragDelta;
+        thumb.DragCompleted += (_, _) => { SnapPosition(); Changed?.Invoke(this, EventArgs.Empty); };
+        return thumb;
+    }
+
+    private void AddResizeThumbs()
+    {
+        AddResizeHandle("NW", HorizontalAlignment.Left, VerticalAlignment.Top, Cursors.SizeNWSE);
+        AddResizeHandle("N", HorizontalAlignment.Center, VerticalAlignment.Top, Cursors.SizeNS, 24, 8);
+        AddResizeHandle("NE", HorizontalAlignment.Right, VerticalAlignment.Top, Cursors.SizeNESW);
+        AddResizeHandle("E", HorizontalAlignment.Right, VerticalAlignment.Center, Cursors.SizeWE, 8, 24);
+        AddResizeHandle("SE", HorizontalAlignment.Right, VerticalAlignment.Bottom, Cursors.SizeNWSE);
+        AddResizeHandle("S", HorizontalAlignment.Center, VerticalAlignment.Bottom, Cursors.SizeNS, 24, 8);
+        AddResizeHandle("SW", HorizontalAlignment.Left, VerticalAlignment.Bottom, Cursors.SizeNESW);
+        AddResizeHandle("W", HorizontalAlignment.Left, VerticalAlignment.Center, Cursors.SizeWE, 8, 24);
+    }
+
+    private void AddResizeHandle(string edge, HorizontalAlignment h, VerticalAlignment v, Cursor cursor, double width = 14, double height = 14)
+    {
+        // Text containers auto-grow vertically; their N/S handles are intentionally
+        // hidden so users resize width while content controls height naturally.
+        if (_autoHeight && edge is "N" or "S" or "NW" or "NE" or "SW" or "SE")
+            return;
+        var thumb = new Thumb
+        {
+            Tag = edge,
+            Width = width,
+            Height = height,
+            Cursor = cursor,
+            HorizontalAlignment = h,
+            VerticalAlignment = v,
+            Background = new SolidColorBrush(Color.FromRgb(126, 34, 206)),
+            BorderBrush = Brushes.White,
+            BorderThickness = new Thickness(1),
+            Visibility = Visibility.Collapsed
+        };
+        thumb.DragStarted += (_, _) => ObjectManipulationStarted?.Invoke(this, EventArgs.Empty);
+        thumb.DragDelta += ResizeThumb_DragDelta;
+        thumb.DragCompleted += (_, _) => Changed?.Invoke(this, EventArgs.Empty);
+        _resizeThumbs.Add(thumb);
+        _interactionLayer.Children.Add(thumb);
+    }
+
+    private void UpdateVisualState()
+    {
+        var accent = new SolidColorBrush(Color.FromRgb(126, 34, 206));
+        var hover = new SolidColorBrush(Color.FromRgb(223, 214, 230));
+        _border.BorderBrush = _isSelected ? accent : _hover ? hover : Brushes.Transparent;
+        _border.BorderThickness = _isSelected ? new Thickness(1.5) : new Thickness(1);
+        foreach (var thumb in _resizeThumbs) thumb.Visibility = _isSelected ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var thumb in _moveThumbs) thumb.Opacity = _isSelected || _hover ? 1 : 0.18;
     }
 
     private void MoveThumb_DragDelta(object sender, DragDeltaEventArgs e)
@@ -167,10 +211,35 @@ public sealed class CanvasObjectControl : ContentControl
 
     private void ResizeThumb_DragDelta(object sender, DragDeltaEventArgs e)
     {
-        Width = Math.Max(_minWidth, Width + e.HorizontalChange);
-        Height = Math.Max(_minHeight, Height + e.VerticalChange);
-        Model.Width = Width;
-        Model.Height = Height;
+        if (sender is not Thumb thumb || thumb.Tag is not string edge) return;
+        var left = double.IsNaN(Canvas.GetLeft(this)) ? 0 : Canvas.GetLeft(this);
+        var top = double.IsNaN(Canvas.GetTop(this)) ? 0 : Canvas.GetTop(this);
+        var width = ActualWidth > 0 ? ActualWidth : Width;
+        var height = ActualHeight > 0 ? ActualHeight : Height;
+
+        if (edge.Contains('E')) width = Math.Max(_minWidth, width + e.HorizontalChange);
+        if (edge.Contains('S') && !_autoHeight) height = Math.Max(_minHeight, height + e.VerticalChange);
+        if (edge.Contains('W'))
+        {
+            var next = Math.Max(_minWidth, width - e.HorizontalChange);
+            left += width - next;
+            width = next;
+        }
+        if (edge.Contains('N') && !_autoHeight)
+        {
+            var next = Math.Max(_minHeight, height - e.VerticalChange);
+            top += height - next;
+            height = next;
+        }
+
+        Canvas.SetLeft(this, Math.Max(0, left));
+        Canvas.SetTop(this, Math.Max(0, top));
+        Width = width;
+        if (!_autoHeight) Height = height;
+        Model.X = Canvas.GetLeft(this);
+        Model.Y = Canvas.GetTop(this);
+        Model.Width = width;
+        Model.Height = _autoHeight ? Math.Max(_minHeight, ActualHeight) : height;
     }
 
     private void SnapPosition()
