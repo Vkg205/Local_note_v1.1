@@ -29,28 +29,33 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force .\artifacts | Out-Null
+          "Branch=${{ github.ref_name }}" | Out-File .\artifacts\run-context.txt -Encoding utf8
+          "Commit=${{ github.sha }}" | Out-File .\artifacts\run-context.txt -Append -Encoding utf8
           dotnet --info | Out-File .\artifacts\dotnet-info.txt -Encoding utf8
           dotnet --list-sdks | Out-File .\artifacts\dotnet-sdks.txt -Encoding utf8
+          Write-Host "Building branch: ${{ github.ref_name }}"
+          Write-Host "Commit: ${{ github.sha }}"
 
-      - name: Validate repository
+      # Advisory only. It catches incomplete Web uploads but MUST NOT hide real
+      # compiler diagnostics. dotnet build below is the authoritative gate.
+      - name: Pre-check repository upload
+        continue-on-error: true
         shell: pwsh
         run: |
-          try {
-            & .\validate-project.ps1 2>&1 | Tee-Object -FilePath .\artifacts\validate.log
-          } catch {
-            $_ | Out-String | Tee-Object -FilePath .\artifacts\validate.log -Append
-            Write-Output "::error title=Repository validation failed::See validate.log in diagnostics artifact."
-            exit 1
+          & .\validate-project.ps1 2>&1 | Tee-Object -FilePath .\artifacts\validate.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            Write-Host "Repository pre-check returned $code; continuing to real restore/build."
           }
+          exit 0
 
-      # Deliberately build without a RuntimeIdentifier. This validates C#/XAML first
-      # without requiring self-contained runtime packs.
       - name: Restore compile dependencies
         shell: pwsh
         run: |
           & dotnet restore .\src\LocalNote.csproj 2>&1 | Tee-Object -FilePath .\artifacts\restore-build.log
           if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error title=Restore failed::See restore-build.log in diagnostics artifact."
+            Write-Output "::error title=Restore failed::Open the Restore compile dependencies step or diagnostics artifact."
+            Get-Content .\artifacts\restore-build.log -Tail 120
             exit $LASTEXITCODE
           }
 
@@ -59,19 +64,22 @@ jobs:
         run: |
           & dotnet build .\src\LocalNote.csproj -c Release --no-restore -p:ContinuousIntegrationBuild=true -bl:.\artifacts\LocalNote-build.binlog 2>&1 | Tee-Object -FilePath .\artifacts\build.log
           if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error title=Compile failed::See build.log and LocalNote-build.binlog in diagnostics artifact."
+            Write-Output "::error title=Compile failed::Open the Build Release step or diagnostics artifact for the exact C#/XAML error."
+            Write-Host '----- LAST 160 BUILD LOG LINES -----'
+            Get-Content .\artifacts\build.log -Tail 160
             exit $LASTEXITCODE
           }
 
-      # Do NOT use --no-restore here. Publish must be allowed to restore the
-      # Microsoft.NETCore.App.Runtime.win-x64 and WindowsDesktop runtime packs.
+      # Publish is allowed to restore win-x64 runtime packs itself.
       - name: Publish self-contained win-x64 EXE
         shell: pwsh
         run: |
           if (Test-Path .\dist\win-x64) { Remove-Item .\dist\win-x64 -Recurse -Force }
           & dotnet publish .\src\LocalNote.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false -p:ContinuousIntegrationBuild=true -bl:.\artifacts\LocalNote-publish.binlog -o .\dist\win-x64 2>&1 | Tee-Object -FilePath .\artifacts\publish.log
           if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error title=Publish failed::See publish.log and LocalNote-publish.binlog in diagnostics artifact."
+            Write-Output "::error title=Publish failed::Open the Publish step or diagnostics artifact."
+            Write-Host '----- LAST 160 PUBLISH LOG LINES -----'
+            Get-Content .\artifacts\publish.log -Tail 160
             exit $LASTEXITCODE
           }
 
