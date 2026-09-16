@@ -3,7 +3,7 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 title LocalNote Build and Publish
 echo ============================================================
-echo LocalNote V0.7.6 - Windows x64 Build
+echo LocalNote V0.8.5 - Windows x64 Build
 echo ============================================================
 echo Project folder: %CD%
 echo.
