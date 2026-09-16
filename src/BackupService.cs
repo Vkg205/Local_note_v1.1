@@ -11,8 +11,9 @@ public sealed class BackupService(string vaultRoot, SqliteDataStore store)
 
     public async Task CreateAsync(string outputPath, CancellationToken cancellationToken = default)
     {
+        var outputFullPath = Path.GetFullPath(outputPath);
         var estimated = Directory.EnumerateFiles(vaultRoot, "*", SearchOption.AllDirectories)
-            .Where(file => !file.Contains(Path.DirectorySeparatorChar + "backups" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            .Where(file => ShouldIncludeSourceFile(file, outputFullPath, vaultRoot))
             .Sum(file => { try { return new FileInfo(file).Length; } catch { return 0L; } });
         DiskSpaceGuard.EnsureWritableSpace(outputPath, estimated);
         await store.CheckpointAsync(cancellationToken);
@@ -24,10 +25,8 @@ public sealed class BackupService(string vaultRoot, SqliteDataStore store)
             foreach (var file in Directory.EnumerateFiles(vaultRoot, "*", SearchOption.AllDirectories))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (!ShouldIncludeSourceFile(file, outputFullPath, vaultRoot)) continue;
                 var relative = Path.GetRelativePath(vaultRoot, file);
-                if (relative.StartsWith("backups" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
-                    relative.EndsWith("-wal", StringComparison.OrdinalIgnoreCase) || relative.EndsWith("-shm", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(Path.GetFileName(relative), ".localnote.lock", StringComparison.OrdinalIgnoreCase)) continue;
                 var target = Path.Combine(tempRoot, relative);
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                 File.Copy(file, target, true);
@@ -92,6 +91,17 @@ public sealed class BackupService(string vaultRoot, SqliteDataStore store)
             throw;
         }
         finally { try { if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true); } catch { } }
+    }
+
+    private static bool ShouldIncludeSourceFile(string file, string outputFullPath, string sourceRoot)
+    {
+        var full = Path.GetFullPath(file);
+        if (string.Equals(full, outputFullPath, StringComparison.OrdinalIgnoreCase)) return false;
+        var relative = Path.GetRelativePath(sourceRoot, full).Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        if (relative.StartsWith("backups" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return false;
+        if (relative.EndsWith("-wal", StringComparison.OrdinalIgnoreCase) || relative.EndsWith("-shm", StringComparison.OrdinalIgnoreCase)) return false;
+        if (string.Equals(Path.GetFileName(relative), ".localnote.lock", StringComparison.OrdinalIgnoreCase)) return false;
+        return true;
     }
 
     private static async Task<string> HashAsync(string file, CancellationToken cancellationToken)

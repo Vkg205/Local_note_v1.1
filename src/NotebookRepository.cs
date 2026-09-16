@@ -67,29 +67,37 @@ public sealed class NotebookRepository(SqliteDataStore store)
         await using var connection = store.CreateConnection();
         await connection.OpenAsync(cancellationToken);
         using var transaction = connection.BeginTransaction();
+        var now = DateTimeOffset.UtcNow.ToString("O");
+        var scope = $"notebook:{id}";
 
+        // Only active descendants inherit this delete scope. Items that were
+        // already deleted keep their original provenance and therefore remain in
+        // the trash if this notebook is later restored.
         var pages = connection.CreateCommand();
         pages.Transaction = transaction;
         pages.CommandText = """
-            UPDATE pages SET is_deleted=1, updated_at=$now
-            WHERE section_id IN (SELECT id FROM sections WHERE notebook_id=$id);
+            UPDATE pages SET is_deleted=1, deleted_by=$scope, updated_at=$now
+            WHERE is_deleted=0 AND section_id IN (SELECT id FROM sections WHERE notebook_id=$id);
             """;
         pages.Parameters.AddWithValue("$id", id);
-        pages.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        pages.Parameters.AddWithValue("$scope", scope);
+        pages.Parameters.AddWithValue("$now", now);
         await pages.ExecuteNonQueryAsync(cancellationToken);
 
         var sections = connection.CreateCommand();
         sections.Transaction = transaction;
-        sections.CommandText = "UPDATE sections SET is_deleted=1, updated_at=$now WHERE notebook_id=$id;";
+        sections.CommandText = "UPDATE sections SET is_deleted=1, deleted_by=$scope, updated_at=$now WHERE notebook_id=$id AND is_deleted=0;";
         sections.Parameters.AddWithValue("$id", id);
-        sections.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        sections.Parameters.AddWithValue("$scope", scope);
+        sections.Parameters.AddWithValue("$now", now);
         await sections.ExecuteNonQueryAsync(cancellationToken);
 
         var notebook = connection.CreateCommand();
         notebook.Transaction = transaction;
-        notebook.CommandText = "UPDATE notebooks SET is_deleted=1, updated_at=$now WHERE id=$id;";
+        notebook.CommandText = "UPDATE notebooks SET is_deleted=1, deleted_by=$scope, updated_at=$now WHERE id=$id AND is_deleted=0;";
         notebook.Parameters.AddWithValue("$id", id);
-        notebook.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        notebook.Parameters.AddWithValue("$scope", scope);
+        notebook.Parameters.AddWithValue("$now", now);
         await notebook.ExecuteNonQueryAsync(cancellationToken);
 
         transaction.Commit();

@@ -71,6 +71,7 @@ public sealed class TableEditorControl : UserControl
 
     public event EventHandler? ContentChanged;
     public event EventHandler? ActiveCellChanged;
+    public event Action<string>? StatusMessage;
     public string Payload => JsonSerializer.Serialize(_data);
     public string SearchText => string.Join(" ", _data.Cells.SelectMany(x => x).Where(x => !string.IsNullOrWhiteSpace(x)));
     public int ActiveRow => _activeRow;
@@ -96,8 +97,8 @@ public sealed class TableEditorControl : UserControl
     public void DeleteActiveRow()
     {
         var minimum = _data.HasHeader ? 2 : 1;
-        if (_data.Rows <= minimum) return;
-        if (_data.HasHeader && _activeRow == 0) return; // header is structural, not a data row.
+        if (_data.Rows <= minimum) { StatusMessage?.Invoke("表格至少需要保留一行数据"); return; }
+        if (_data.HasHeader && _activeRow == 0) { StatusMessage?.Invoke("表头名称行不能作为数据行删除；可在表格工具中关闭表头"); return; } // header is structural, not a data row.
         var index = Math.Clamp(_activeRow, 0, _data.Rows - 1);
         _data.Cells.RemoveAt(index);
         _data.Rows--;
@@ -119,7 +120,7 @@ public sealed class TableEditorControl : UserControl
 
     public void DeleteActiveColumn()
     {
-        if (_data.Columns <= 1) return;
+        if (_data.Columns <= 1) { StatusMessage?.Invoke("表格至少需要保留一列"); return; }
         var index = Math.Clamp(_activeColumn, 0, _data.Columns - 1);
         foreach (var row in _data.Cells) row.RemoveAt(index);
         if (_data.ColumnWidths.Count > index) _data.ColumnWidths.RemoveAt(index);
@@ -239,18 +240,27 @@ public sealed class TableEditorControl : UserControl
         RebuildAndSave(focus: true);
     }
 
-    private void InsertRow(int index)
+    private bool InsertRow(int index)
     {
-        if (_data.Rows >= 50) return;
+        if (_data.Rows >= 50)
+        {
+            StatusMessage?.Invoke("表格最多支持 50 行");
+            return false;
+        }
         _data.Cells.Insert(index, Enumerable.Repeat(string.Empty, _data.Columns).ToList());
         _data.Rows++;
         _activeRow = index;
         RebuildAndSave(focus: true);
+        return true;
     }
 
-    private void InsertColumn(int index)
+    private bool InsertColumn(int index)
     {
-        if (_data.Columns >= 20) return;
+        if (_data.Columns >= 20)
+        {
+            StatusMessage?.Invoke("表格最多支持 20 列");
+            return false;
+        }
         for (var row = 0; row < _data.Cells.Count; row++)
         {
             var defaultText = _data.HasHeader && row == 0 ? $"列 {_data.Columns + 1}" : string.Empty;
@@ -261,6 +271,7 @@ public sealed class TableEditorControl : UserControl
         RenameDefaultHeaders();
         _activeColumn = index;
         RebuildAndSave(focus: true);
+        return true;
     }
 
     private void RebuildAndSave(bool focus = false)
@@ -384,7 +395,12 @@ public sealed class TableEditorControl : UserControl
             {
                 _activeRow = _data.Rows - 1;
                 _activeColumn = _data.Columns - 1;
-                InsertRowBelow();
+                if (!InsertRow(_data.Rows))
+                {
+                    Dispatcher.BeginInvoke(() => FocusCell(_activeRow, _activeColumn), DispatcherPriority.Input);
+                    e.Handled = true;
+                    return;
+                }
                 r = _data.Rows - 1;
                 c = 0;
             }

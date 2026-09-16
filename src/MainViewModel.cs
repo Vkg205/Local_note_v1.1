@@ -26,6 +26,15 @@ public sealed class MainViewModel : ObservableObject
     private bool _isVaultOpen;
     private SessionStateService? _sessionState;
     private VaultWriteLock? _writeLock;
+    private readonly Dictionary<string, string> _lastSectionByNotebook = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _lastPageBySection = new(StringComparer.Ordinal);
+    private string? _restoreNotebookId;
+    private string? _restoreSectionId;
+    private string? _restorePageId;
+    private string? _pageToFocusId;
+    private int _sectionLoadVersion;
+    private int _pageLoadVersion;
+    private bool _suppressAutoNavigationLoads;
 
     public MainViewModel()
     {
@@ -68,6 +77,8 @@ public sealed class MainViewModel : ObservableObject
     public VaultIntegrityService? IntegrityService { get; private set; }
     public string? VaultRoot => _vault?.RootPath;
     public event EventHandler? ActivePageChanged;
+    public event EventHandler? NewPageCreated;
+    public Func<Task>? BeforeVaultSwitchAsync { get; set; }
 
     public bool IsVaultOpen
     {
@@ -81,13 +92,31 @@ public sealed class MainViewModel : ObservableObject
     public Notebook? SelectedNotebook
     {
         get => _selectedNotebook;
-        set { if (!SetProperty(ref _selectedNotebook, value)) return; RefreshCanExecute(); _ = LoadSectionsAsync(value); }
+        set
+        {
+            if (_selectedNotebook is not null && _selectedSection is not null)
+                _lastSectionByNotebook[_selectedNotebook.Id] = _selectedSection.Id;
+            if (!SetProperty(ref _selectedNotebook, value)) return;
+            RefreshCanExecute();
+            if (!_suppressAutoNavigationLoads)
+                _ = RunNavigationLoadAsync(() => LoadSectionsAsync(value));
+        }
     }
 
     public Section? SelectedSection
     {
         get => _selectedSection;
-        set { if (!SetProperty(ref _selectedSection, value)) return; RefreshCanExecute(); _ = LoadPagesAsync(value); }
+        set
+        {
+            if (_selectedSection is not null && _selectedPage is not null)
+                _lastPageBySection[_selectedSection.Id] = _selectedPage.Id;
+            if (!SetProperty(ref _selectedSection, value)) return;
+            if (_selectedNotebook is not null && value is not null)
+                _lastSectionByNotebook[_selectedNotebook.Id] = value.Id;
+            RefreshCanExecute();
+            if (!_suppressAutoNavigationLoads)
+                _ = RunNavigationLoadAsync(() => LoadPagesAsync(value));
+        }
     }
 
     public Page? SelectedPage
@@ -96,7 +125,16 @@ public sealed class MainViewModel : ObservableObject
         set
         {
             if (!SetProperty(ref _selectedPage, value)) return;
-            RefreshCanExecute(); ActivePageChanged?.Invoke(this, EventArgs.Empty);
+            if (_selectedSection is not null && value is not null)
+                _lastPageBySection[_selectedSection.Id] = value.Id;
+            RefreshCanExecute();
+            ActivePageChanged?.Invoke(this, EventArgs.Empty);
+            _ = PersistNavigationStateAsync();
+            if (value is not null && value.Id == _pageToFocusId)
+            {
+                _pageToFocusId = null;
+                NewPageCreated?.Invoke(this, EventArgs.Empty);
+            }
         }
     }
 
@@ -105,14 +143,14 @@ public sealed class MainViewModel : ObservableObject
         var path = await _settings.GetLastVaultAsync();
         if (path is null || !Directory.Exists(path))
         {
-            StatusText = "欢迎使用 LocalNote · 请创建或打开本地 Vault";
+            StatusText = "欢迎使用 LocalNote · 请创建或打开本地仓库";
             return;
         }
         try { await LoadVaultAsync(path); }
         catch
         {
             await _settings.SaveLastVaultAsync(null);
-            StatusText = "上次使用的 Vault 无法打开 · 请重新选择或创建";
+            StatusText = "上次使用的本地仓库无法打开 · 请重新选择或创建";
         }
     }
 
@@ -130,11 +168,50 @@ public sealed class MainViewModel : ObservableObject
         if (SelectedPage is null || _pageRepository is null) return;
         title = string.IsNullOrWhiteSpace(title) ? "无标题页" : title.Trim();
         if (title == SelectedPage.Title) return;
-        var id = SelectedPage.Id;
-        await _pageRepository.RenameAsync(id, title);
-        await LoadPagesAsync(SelectedSection);
-        SelectedPage = Pages.FirstOrDefault(x => x.Id == id);
+
+        // Renaming used to reload the entire page collection. That temporarily cleared
+        // SelectedPage, rebound the canvas to null, and could race with Enter creating
+        // the first text block on a newly created page. Update the navigation item in
+        // place without changing the active page/canvas.
+        var current = SelectedPage;
+        await _pageRepository.RenameAsync(current.Id, title);
+        var updated = new Page
+        {
+            Id = current.Id, SectionId = current.SectionId, ParentPageId = current.ParentPageId,
+            Title = title, IndentLevel = current.IndentLevel, SortOrder = current.SortOrder,
+            IsPinned = current.IsPinned, IsDeleted = current.IsDeleted, PaperStyle = current.PaperStyle, LocalVersion = current.LocalVersion + 1,
+            CreatedAt = current.CreatedAt, UpdatedAt = DateTimeOffset.UtcNow
+        };
+        var index = Pages.IndexOf(current);
+        if (index >= 0) Pages[index] = updated;
+        _selectedPage = updated;
+        Raise(nameof(SelectedPage));
         StatusText = "页面标题已自动保存";
+    }
+
+    public async Task UpdateSelectedPagePaperStyleAsync(string paperStyle)
+    {
+        if (SelectedPage is null || _pageRepository is null) return;
+        paperStyle = paperStyle is "Grid" or "Lines" or "Dots" ? paperStyle : "Blank";
+        if (string.Equals(SelectedPage.PaperStyle, paperStyle, StringComparison.Ordinal)) return;
+
+        var current = SelectedPage;
+        await _pageRepository.UpdatePaperStyleAsync(current.Id, paperStyle);
+        var updated = new Page
+        {
+            Id = current.Id, SectionId = current.SectionId, ParentPageId = current.ParentPageId,
+            Title = current.Title, IndentLevel = current.IndentLevel, SortOrder = current.SortOrder,
+            IsPinned = current.IsPinned, IsDeleted = current.IsDeleted, PaperStyle = paperStyle, LocalVersion = current.LocalVersion + 1,
+            CreatedAt = current.CreatedAt, UpdatedAt = DateTimeOffset.UtcNow
+        };
+        var index = Pages.ToList().FindIndex(x => x.Id == current.Id);
+        if (index >= 0) Pages[index] = updated;
+        if (SelectedPage?.Id == current.Id)
+        {
+            _selectedPage = updated;
+            Raise(nameof(SelectedPage));
+        }
+        StatusText = "纸张样式已保存";
     }
 
     public async Task<IReadOnlyList<PageDestination>> GetPageDestinationsAsync() =>
@@ -155,7 +232,9 @@ public sealed class MainViewModel : ObservableObject
                 Id = current.Id, NotebookId = current.NotebookId, ParentGroupId = current.ParentGroupId, Name = current.Name, Color = color,
                 SortOrder = current.SortOrder, IsDeleted = current.IsDeleted, CreatedAt = current.CreatedAt, UpdatedAt = DateTimeOffset.UtcNow
             };
-            SelectedSection = Sections[index];
+            // Color-only changes must not reload pages/canvas.
+            _selectedSection = Sections[index];
+            Raise(nameof(SelectedSection));
         }
         StatusText = "分区颜色已更新";
     }
@@ -193,13 +272,36 @@ public sealed class MainViewModel : ObservableObject
         if (_pageRepository is null) return;
         var context = await _pageRepository.GetContextAsync(pageId);
         if (context is null || context.Value.Page.IsDeleted) return;
-        var notebook = Notebooks.FirstOrDefault(x => x.Id == context.Value.NotebookId);
-        if (notebook is null) { await LoadNotebooksAsync(); notebook = Notebooks.FirstOrDefault(x => x.Id == context.Value.NotebookId); }
-        if (notebook is null) return;
-        SelectedNotebook = notebook; await LoadSectionsAsync(notebook);
-        var section = Sections.FirstOrDefault(x => x.Id == context.Value.SectionId); if (section is null) return;
-        SelectedSection = section; await LoadPagesAsync(section);
-        SelectedPage = Pages.FirstOrDefault(x => x.Id == pageId);
+
+        // Search/result navigation is a single transaction. Suppress property-setter
+        // background loads for its entire lifetime; otherwise LoadNotebooksAsync,
+        // SelectedNotebook and SelectedSection can start overlapping section/page
+        // queries and reset the selection after the target page has already opened.
+        _suppressAutoNavigationLoads = true;
+        try
+        {
+            var notebook = Notebooks.FirstOrDefault(x => x.Id == context.Value.NotebookId);
+            if (notebook is null)
+            {
+                await LoadNotebooksAsync();
+                notebook = Notebooks.FirstOrDefault(x => x.Id == context.Value.NotebookId);
+            }
+            if (notebook is null) return;
+
+            SelectedNotebook = notebook;
+            await LoadSectionsAsync(notebook);
+
+            var section = Sections.FirstOrDefault(x => x.Id == context.Value.SectionId);
+            if (section is null) return;
+
+            SelectedSection = section;
+            await LoadPagesAsync(section);
+            SelectedPage = Pages.FirstOrDefault(x => x.Id == pageId);
+        }
+        finally
+        {
+            _suppressAutoNavigationLoads = false;
+        }
     }
 
     private async Task CreateVaultAsync()
@@ -210,11 +312,23 @@ public sealed class MainViewModel : ObservableObject
         if (nameDialog.ShowDialog() != true) return;
         await RunUiSafeAsync(async () =>
         {
+            if (BeforeVaultSwitchAsync is not null) await BeforeVaultSwitchAsync();
             await CloseCurrentVaultAsync();
-            var (vault, store) = await _vaultService.CreateAsync(dialog.FolderName, nameDialog.Value);
-            _writeLock = VaultWriteLock.Acquire(vault.RootPath);
-            await BindVaultAsync(vault, store); await EnsureStarterContentAsync(); await LoadNotebooksAsync();
-            await _settings.SaveLastVaultAsync(vault.RootPath); StatusText = "本地仓库已创建";
+            try
+            {
+                var (vault, store) = await _vaultService.CreateAsync(dialog.FolderName, nameDialog.Value);
+                _writeLock = VaultWriteLock.Acquire(vault.RootPath);
+                await BindVaultAsync(vault, store);
+                await EnsureStarterContentAsync();
+                await LoadNotebooksAsync();
+                await _settings.SaveLastVaultAsync(vault.RootPath);
+                StatusText = "本地仓库已创建";
+            }
+            catch
+            {
+                await CloseCurrentVaultAsync();
+                throw;
+            }
         });
     }
 
@@ -227,22 +341,64 @@ public sealed class MainViewModel : ObservableObject
 
     private async Task LoadVaultAsync(string path)
     {
+        if (BeforeVaultSwitchAsync is not null) await BeforeVaultSwitchAsync();
         await CloseCurrentVaultAsync();
-        var newLock = VaultWriteLock.Acquire(path);
+        VaultWriteLock? newLock = null;
         try
         {
+            newLock = VaultWriteLock.Acquire(path);
             var (vault, store) = await _vaultService.OpenAsync(path);
             _writeLock = newLock;
-            await BindVaultAsync(vault, store); await LoadNotebooksAsync(); await _settings.SaveLastVaultAsync(vault.RootPath);
-            if (!StatusText.Contains("恢复")) StatusText = "仓库已打开";
+            await BindVaultAsync(vault, store);
+            var nav = await _settings.GetNavigationStateAsync(vault.RootPath);
+            _restoreNotebookId = nav.NotebookId; _restoreSectionId = nav.SectionId; _restorePageId = nav.PageId;
+            if (_restoreNotebookId is not null && _restoreSectionId is not null) _lastSectionByNotebook[_restoreNotebookId] = _restoreSectionId;
+            if (_restoreSectionId is not null && _restorePageId is not null) _lastPageBySection[_restoreSectionId] = _restorePageId;
+            await LoadNotebooksAsync();
+            await _settings.SaveLastVaultAsync(vault.RootPath);
+            if (!StatusText.Contains("恢复")) StatusText = "本地仓库已打开";
         }
-        catch { newLock.Dispose(); if (ReferenceEquals(_writeLock, newLock)) _writeLock = null; throw; }
+        catch
+        {
+            if (ReferenceEquals(_writeLock, newLock)) _writeLock = null;
+            newLock?.Dispose();
+            try { await CloseCurrentVaultAsync(); } catch { }
+            throw;
+        }
     }
 
     private async Task CloseCurrentVaultAsync()
     {
-        if (_sessionState is not null) await _sessionState.EndAsync();
-        _sessionState = null; _writeLock?.Dispose(); _writeLock = null;
+        try
+        {
+            if (_sessionState is not null) await _sessionState.EndAsync();
+        }
+        finally
+        {
+            _sessionState = null;
+            _writeLock?.Dispose();
+            _writeLock = null;
+            _vault = null;
+            ActiveStore = null;
+            _notebookRepository = null;
+            _sectionRepository = null;
+            _pageRepository = null;
+            ContentRepository = null;
+            InkRepository = null;
+            SearchRepository = null;
+            TrashRepository = null;
+            MediaStore = null;
+            BackupService = null;
+            IntegrityService = null;
+            IsVaultOpen = false;
+            Notebooks.Clear(); Sections.Clear(); Pages.Clear();
+            _selectedNotebook = null; Raise(nameof(SelectedNotebook));
+            _selectedSection = null; Raise(nameof(SelectedSection));
+            _selectedPage = null; Raise(nameof(SelectedPage));
+            Raise(nameof(VaultSummary));
+            RefreshCanExecute();
+            ActivePageChanged?.Invoke(this, EventArgs.Empty);
+        }
     }
 
     private async Task BindVaultAsync(VaultInfo vault, SqliteDataStore store)
@@ -266,41 +422,62 @@ public sealed class MainViewModel : ObservableObject
         var page = await _pageRepository.CreateAsync(section.Id, "欢迎使用 LocalNote");
         if (ContentRepository is null) return;
         await ContentRepository.CreateAsync(page.Id, ContentObjectType.Text, 120, 100, 540, 190,
-            "欢迎使用 LocalNote\r\n\r\n双击空白画布即可新建富文本块。所有内容只保存在本机 Vault 中。", "欢迎使用 LocalNote 双击空白画布 新建富文本块 本机 Vault");
+            "欢迎使用 LocalNote\r\n\r\n双击空白画布即可新建富文本块。所有内容只保存在本机仓库中。", "欢迎使用 LocalNote 双击空白画布 新建富文本块 本机仓库");
         await ContentRepository.CreateAsync(page.Id, ContentObjectType.Text, 720, 180, 430, 180,
-            "高频操作\r\n• Ctrl + 滚轮缩放\r\n• 鼠标中键平移画布\r\n• 拖动内容卡片顶部移动\r\n• 右键内容卡片添加待办/重要标签", "高频操作 缩放 平移 画布 待办 重要 标签");
+            "高频操作\r\n• Ctrl + 滚轮缩放\r\n• 按住 Space + 左键拖动画布\r\n• 拖动内容块边框即可移动\r\n• Ctrl+1 将文本段落切换为待办\r\n• 右键内容块可标记重要", "高频操作 缩放 平移 画布 待办 重要 标签");
     }
 
     private async Task LoadNotebooksAsync()
     {
         Notebooks.Clear(); Sections.Clear(); Pages.Clear();
         _selectedNotebook = null; Raise(nameof(SelectedNotebook)); _selectedSection = null; Raise(nameof(SelectedSection)); _selectedPage = null; Raise(nameof(SelectedPage));
+        RefreshCanExecute();
         if (_vault is null || _notebookRepository is null) return;
         foreach (var item in await _notebookRepository.GetActiveAsync(_vault.Id)) Notebooks.Add(item);
-        SelectedNotebook = Notebooks.FirstOrDefault();
+        var desired = _restoreNotebookId;
+        _restoreNotebookId = null;
+        SelectedNotebook = Notebooks.FirstOrDefault(x => x.Id == desired) ?? Notebooks.FirstOrDefault();
     }
 
     private async Task LoadSectionsAsync(Notebook? notebook)
     {
-        Sections.Clear(); Pages.Clear(); _selectedSection = null; Raise(nameof(SelectedSection)); _selectedPage = null; Raise(nameof(SelectedPage)); ActivePageChanged?.Invoke(this, EventArgs.Empty);
+        var loadVersion = Interlocked.Increment(ref _sectionLoadVersion);
+        Sections.Clear(); Pages.Clear(); _selectedSection = null; Raise(nameof(SelectedSection)); _selectedPage = null; Raise(nameof(SelectedPage)); RefreshCanExecute(); ActivePageChanged?.Invoke(this, EventArgs.Empty);
         if (notebook is null || _sectionRepository is null) return;
-        foreach (var item in await _sectionRepository.GetActiveAsync(notebook.Id)) Sections.Add(item);
-        SelectedSection = Sections.FirstOrDefault();
+        var notebookId = notebook.Id;
+        var items = await _sectionRepository.GetActiveAsync(notebookId);
+        if (loadVersion != _sectionLoadVersion || _selectedNotebook?.Id != notebookId) return;
+        foreach (var item in items) Sections.Add(item);
+        var desired = _restoreSectionId ?? (_lastSectionByNotebook.TryGetValue(notebookId, out var remembered) ? remembered : null);
+        _restoreSectionId = null;
+        SelectedSection = Sections.FirstOrDefault(x => x.Id == desired) ?? Sections.FirstOrDefault();
     }
 
     private async Task LoadPagesAsync(Section? section)
     {
-        Pages.Clear(); _selectedPage = null; Raise(nameof(SelectedPage)); ActivePageChanged?.Invoke(this, EventArgs.Empty);
+        var loadVersion = Interlocked.Increment(ref _pageLoadVersion);
+        Pages.Clear(); _selectedPage = null; Raise(nameof(SelectedPage)); RefreshCanExecute(); ActivePageChanged?.Invoke(this, EventArgs.Empty);
         if (section is null || _pageRepository is null) return;
-        foreach (var item in await _pageRepository.GetActiveAsync(section.Id)) Pages.Add(item);
-        SelectedPage = Pages.FirstOrDefault();
+        var sectionId = section.Id;
+        var items = await _pageRepository.GetActiveAsync(sectionId);
+        if (loadVersion != _pageLoadVersion || _selectedSection?.Id != sectionId) return;
+        foreach (var item in items) Pages.Add(item);
+        var desired = _restorePageId ?? (_lastPageBySection.TryGetValue(sectionId, out var remembered) ? remembered : null);
+        _restorePageId = null;
+        SelectedPage = Pages.FirstOrDefault(x => x.Id == desired) ?? Pages.FirstOrDefault();
     }
 
     private async Task AddNotebookAsync()
     {
-        if (_vault is null || _notebookRepository is null) return;
+        if (_vault is null || _notebookRepository is null || _sectionRepository is null || _pageRepository is null) return;
         var dialog = NewNameDialog("新建笔记本", "笔记本名称：", $"新建笔记本 {Notebooks.Count + 1}"); if (dialog.ShowDialog() != true) return;
-        var item = await _notebookRepository.CreateAsync(_vault.Id, dialog.Value); Notebooks.Add(item); SelectedNotebook = item; StatusText = "笔记本已创建";
+        var item = await _notebookRepository.CreateAsync(_vault.Id, dialog.Value);
+        var section = await _sectionRepository.CreateAsync(item.Id, "快速笔记");
+        var page = await _pageRepository.CreateAsync(section.Id, "无标题页");
+        _lastSectionByNotebook[item.Id] = section.Id; _lastPageBySection[section.Id] = page.Id;
+        _restoreSectionId = section.Id; _restorePageId = page.Id; _pageToFocusId = page.Id;
+        Notebooks.Add(item); SelectedNotebook = item;
+        StatusText = "笔记本已创建 · 已准备快速笔记页面";
     }
     private async Task RenameNotebookAsync()
     {
@@ -315,9 +492,12 @@ public sealed class MainViewModel : ObservableObject
     }
     private async Task AddSectionAsync()
     {
-        if (SelectedNotebook is null || _sectionRepository is null) return;
+        if (SelectedNotebook is null || _sectionRepository is null || _pageRepository is null) return;
         var dialog = NewNameDialog("新建分区", "分区名称：", $"新建分区 {Sections.Count + 1}"); if (dialog.ShowDialog() != true) return;
-        var item = await _sectionRepository.CreateAsync(SelectedNotebook.Id, dialog.Value); Sections.Add(item); SelectedSection = item; StatusText = "分区已创建";
+        var item = await _sectionRepository.CreateAsync(SelectedNotebook.Id, dialog.Value);
+        var page = await _pageRepository.CreateAsync(item.Id, "无标题页");
+        _lastPageBySection[item.Id] = page.Id; _restorePageId = page.Id; _pageToFocusId = page.Id;
+        Sections.Add(item); SelectedSection = item; StatusText = "分区已创建 · 已准备空白页";
     }
     private async Task RenameSectionAsync()
     {
@@ -333,7 +513,9 @@ public sealed class MainViewModel : ObservableObject
     private async Task AddPageAsync()
     {
         if (SelectedSection is null || _pageRepository is null) return;
-        var item = await _pageRepository.CreateAsync(SelectedSection.Id, "无标题页"); Pages.Add(item); SelectedPage = item; StatusText = "页面已创建";
+        var item = await _pageRepository.CreateAsync(SelectedSection.Id, "无标题页");
+        _pageToFocusId = item.Id;
+        Pages.Add(item); SelectedPage = item; StatusText = "页面已创建 · 输入标题后即可开始记录";
     }
     private async Task RenamePageAsync()
     {
@@ -345,6 +527,22 @@ public sealed class MainViewModel : ObservableObject
     {
         if (SelectedPage is null || _pageRepository is null || !Confirm($"将页面“{SelectedPage.Title}”移入回收站？")) return;
         await _pageRepository.SoftDeleteAsync(SelectedPage.Id); await LoadPagesAsync(SelectedSection); StatusText = "页面已移入回收站";
+    }
+
+    private async Task RunNavigationLoadAsync(Func<Task> action)
+    {
+        try { await action(); }
+        catch (Exception ex) { StatusText = $"导航加载失败：{ex.Message}"; }
+    }
+
+    private async Task PersistNavigationStateAsync()
+    {
+        try
+        {
+            if (_vault is null) return;
+            await _settings.SaveNavigationStateAsync(_vault.RootPath, SelectedNotebook?.Id, SelectedSection?.Id, SelectedPage?.Id);
+        }
+        catch { }
     }
 
     private TextInputDialog NewNameDialog(string title, string prompt, string initial) => new(title, prompt, initial) { Owner = Application.Current.MainWindow };

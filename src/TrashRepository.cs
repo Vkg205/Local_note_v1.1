@@ -37,20 +37,26 @@ public sealed class TrashRepository(SqliteDataStore store)
         switch (item.Kind)
         {
             case "笔记本":
-                await ExecuteAsync(connection, transaction, "UPDATE notebooks SET is_deleted=0,updated_at=$now WHERE id=$id;", item.Id, now);
-                await ExecuteAsync(connection, transaction, "UPDATE sections SET is_deleted=0,updated_at=$now WHERE notebook_id=$id;", item.Id, now);
-                await ExecuteAsync(connection, transaction, "UPDATE pages SET is_deleted=0,updated_at=$now WHERE section_id IN (SELECT id FROM sections WHERE notebook_id=$id);", item.Id, now);
+            {
+                var scope = $"notebook:{item.Id}";
+                await ExecuteScopedAsync(connection, transaction, "UPDATE notebooks SET is_deleted=0,deleted_by=NULL,updated_at=$now WHERE id=$id AND deleted_by=$scope;", item.Id, scope, now);
+                await ExecuteScopedAsync(connection, transaction, "UPDATE sections SET is_deleted=0,deleted_by=NULL,updated_at=$now WHERE notebook_id=$id AND deleted_by=$scope;", item.Id, scope, now);
+                await ExecuteScopedAsync(connection, transaction, "UPDATE pages SET is_deleted=0,deleted_by=NULL,updated_at=$now WHERE section_id IN (SELECT id FROM sections WHERE notebook_id=$id) AND deleted_by=$scope;", item.Id, scope, now);
                 break;
+            }
             case "分区":
-                await ExecuteAsync(connection, transaction, "UPDATE notebooks SET is_deleted=0,updated_at=$now WHERE id=(SELECT notebook_id FROM sections WHERE id=$id);", item.Id, now);
-                await ExecuteAsync(connection, transaction, "UPDATE sections SET is_deleted=0,updated_at=$now WHERE id=$id;", item.Id, now);
-                await ExecuteAsync(connection, transaction, "UPDATE pages SET is_deleted=0,updated_at=$now WHERE section_id=$id;", item.Id, now);
+            {
+                var scope = $"section:{item.Id}";
+                await ExecuteScopedAsync(connection, transaction, "UPDATE sections SET is_deleted=0,deleted_by=NULL,updated_at=$now WHERE id=$id AND deleted_by=$scope;", item.Id, scope, now);
+                await ExecuteScopedAsync(connection, transaction, "UPDATE pages SET is_deleted=0,deleted_by=NULL,updated_at=$now WHERE section_id=$id AND deleted_by=$scope;", item.Id, scope, now);
                 break;
+            }
             case "页面":
-                await ExecuteAsync(connection, transaction, "UPDATE notebooks SET is_deleted=0,updated_at=$now WHERE id=(SELECT s.notebook_id FROM pages p JOIN sections s ON s.id=p.section_id WHERE p.id=$id);", item.Id, now);
-                await ExecuteAsync(connection, transaction, "UPDATE sections SET is_deleted=0,updated_at=$now WHERE id=(SELECT section_id FROM pages WHERE id=$id);", item.Id, now);
-                await ExecuteAsync(connection, transaction, "UPDATE pages SET is_deleted=0,updated_at=$now WHERE id=$id;", item.Id, now);
+            {
+                var scope = $"page:{item.Id}";
+                await ExecuteScopedAsync(connection, transaction, "UPDATE pages SET is_deleted=0,deleted_by=NULL,updated_at=$now WHERE id=$id AND deleted_by=$scope;", item.Id, scope, now);
                 break;
+            }
             default: throw new InvalidOperationException("未知回收站对象类型。");
         }
         await transaction.CommitAsync();
@@ -77,9 +83,10 @@ public sealed class TrashRepository(SqliteDataStore store)
         await transaction.CommitAsync();
     }
 
-    private static async Task ExecuteAsync(SqliteConnection connection, System.Data.Common.DbTransaction transaction, string sql, string id, string now)
+    private static async Task ExecuteScopedAsync(SqliteConnection connection, System.Data.Common.DbTransaction transaction, string sql, string id, string scope, string now)
     {
         var command = connection.CreateCommand(); command.Transaction = (SqliteTransaction)transaction; command.CommandText = sql;
-        command.Parameters.AddWithValue("$id", id); command.Parameters.AddWithValue("$now", now); await command.ExecuteNonQueryAsync();
+        command.Parameters.AddWithValue("$id", id); command.Parameters.AddWithValue("$scope", scope); command.Parameters.AddWithValue("$now", now);
+        await command.ExecuteNonQueryAsync();
     }
 }

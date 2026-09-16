@@ -14,7 +14,7 @@ public sealed class PageRepository(SqliteDataStore store)
         var command = connection.CreateCommand();
         command.CommandText = """
             SELECT id, section_id, parent_page_id, title, indent_level, sort_order, is_pinned,
-                   is_deleted, local_version, created_at, updated_at
+                   is_deleted, paper_style, local_version, created_at, updated_at
             FROM pages
             WHERE section_id=$sectionId AND is_deleted=0
             ORDER BY is_pinned DESC, sort_order, created_at;
@@ -42,8 +42,8 @@ public sealed class PageRepository(SqliteDataStore store)
         var command = connection.CreateCommand();
         command.CommandText = """
             INSERT INTO pages(id, section_id, parent_page_id, title, indent_level, sort_order, is_pinned,
-                              is_deleted, local_version, created_at, updated_at)
-            VALUES($id, $sectionId, NULL, $title, 0, $sortOrder, 0, 0, 1, $createdAt, $updatedAt);
+                              is_deleted, deleted_by, paper_style, local_version, created_at, updated_at)
+            VALUES($id, $sectionId, NULL, $title, 0, $sortOrder, 0, 0, NULL, 'Blank', 1, $createdAt, $updatedAt);
             """;
         command.Parameters.AddWithValue("$id", item.Id);
         command.Parameters.AddWithValue("$sectionId", item.SectionId);
@@ -81,13 +81,27 @@ public sealed class PageRepository(SqliteDataStore store)
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task UpdatePaperStyleAsync(string id, string paperStyle, CancellationToken cancellationToken = default)
+    {
+        paperStyle = paperStyle is "Grid" or "Lines" or "Dots" ? paperStyle : "Blank";
+        await using var connection = store.CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        var command = connection.CreateCommand();
+        command.CommandText = "UPDATE pages SET paper_style=$style, local_version=local_version+1, updated_at=$now WHERE id=$id;";
+        command.Parameters.AddWithValue("$id", id);
+        command.Parameters.AddWithValue("$style", paperStyle);
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public async Task SoftDeleteAsync(string id, CancellationToken cancellationToken = default)
     {
         await using var connection = store.CreateConnection();
         await connection.OpenAsync(cancellationToken);
         var command = connection.CreateCommand();
-        command.CommandText = "UPDATE pages SET is_deleted=1, updated_at=$now WHERE id=$id;";
+        command.CommandText = "UPDATE pages SET is_deleted=1, deleted_by=$scope, updated_at=$now WHERE id=$id AND is_deleted=0;";
         command.Parameters.AddWithValue("$id", id);
+        command.Parameters.AddWithValue("$scope", $"page:{id}");
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -99,7 +113,7 @@ public sealed class PageRepository(SqliteDataStore store)
         var command = connection.CreateCommand();
         command.CommandText = """
             SELECT n.id, s.id, p.id, p.section_id, p.parent_page_id, p.title, p.indent_level, p.sort_order, p.is_pinned,
-                   p.is_deleted, p.local_version, p.created_at, p.updated_at
+                   p.is_deleted, p.paper_style, p.local_version, p.created_at, p.updated_at
             FROM pages p JOIN sections s ON s.id=p.section_id JOIN notebooks n ON n.id=s.notebook_id
             WHERE p.id=$id LIMIT 1;
             """;
@@ -110,7 +124,7 @@ public sealed class PageRepository(SqliteDataStore store)
         {
             Id = reader.GetString(2), SectionId = reader.GetString(3), ParentPageId = reader.IsDBNull(4) ? null : reader.GetString(4),
             Title = reader.GetString(5), IndentLevel = reader.GetInt32(6), SortOrder = reader.GetInt32(7), IsPinned = reader.GetInt32(8) != 0,
-            IsDeleted = reader.GetInt32(9) != 0, LocalVersion = reader.GetInt32(10), CreatedAt = DateTimeOffset.Parse(reader.GetString(11)), UpdatedAt = DateTimeOffset.Parse(reader.GetString(12))
+            IsDeleted = reader.GetInt32(9) != 0, PaperStyle = reader.GetString(10), LocalVersion = reader.GetInt32(11), CreatedAt = DateTimeOffset.Parse(reader.GetString(12)), UpdatedAt = DateTimeOffset.Parse(reader.GetString(13))
         };
         return (reader.GetString(0), reader.GetString(1), page);
     }
@@ -152,12 +166,12 @@ public sealed class PageRepository(SqliteDataStore store)
         await using var connection = store.CreateConnection(); await connection.OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var sourceCmd = connection.CreateCommand(); sourceCmd.Transaction=(SqliteTransaction)transaction;
-        sourceCmd.CommandText="SELECT title,is_pinned FROM pages WHERE id=$id AND is_deleted=0 LIMIT 1;"; sourceCmd.Parameters.AddWithValue("$id",sourcePageId);
-        string sourceTitle; bool pinned;
+        sourceCmd.CommandText="SELECT title,is_pinned,paper_style FROM pages WHERE id=$id AND is_deleted=0 LIMIT 1;"; sourceCmd.Parameters.AddWithValue("$id",sourcePageId);
+        string sourceTitle; bool pinned; string paperStyle;
         await using (var reader=await sourceCmd.ExecuteReaderAsync(cancellationToken))
         {
             if (!await reader.ReadAsync(cancellationToken)) throw new InvalidOperationException("源页面不存在或已删除。");
-            sourceTitle=reader.GetString(0); pinned=reader.GetInt32(1)!=0;
+            sourceTitle=reader.GetString(0); pinned=reader.GetInt32(1)!=0; paperStyle=reader.GetString(2);
         }
         var orderCmd=connection.CreateCommand(); orderCmd.Transaction=(SqliteTransaction)transaction;
         orderCmd.CommandText="SELECT COALESCE(MAX(sort_order),-1)+1 FROM pages WHERE section_id=$section AND is_deleted=0;"; orderCmd.Parameters.AddWithValue("$section",targetSectionId);
@@ -165,11 +179,11 @@ public sealed class PageRepository(SqliteDataStore store)
         var now=DateTimeOffset.UtcNow; var newPageId=Guid.NewGuid().ToString("N"); var newTitle=$"{sourceTitle} - 副本";
         var insertPage=connection.CreateCommand(); insertPage.Transaction=(SqliteTransaction)transaction;
         insertPage.CommandText="""
-            INSERT INTO pages(id,section_id,parent_page_id,title,indent_level,sort_order,is_pinned,is_deleted,local_version,created_at,updated_at)
-            VALUES($id,$section,NULL,$title,0,$sort,$pinned,0,1,$now,$now);
+            INSERT INTO pages(id,section_id,parent_page_id,title,indent_level,sort_order,is_pinned,is_deleted,deleted_by,paper_style,local_version,created_at,updated_at)
+            VALUES($id,$section,NULL,$title,0,$sort,$pinned,0,NULL,$paperStyle,1,$now,$now);
             """;
         insertPage.Parameters.AddWithValue("$id",newPageId); insertPage.Parameters.AddWithValue("$section",targetSectionId); insertPage.Parameters.AddWithValue("$title",newTitle);
-        insertPage.Parameters.AddWithValue("$sort",sort); insertPage.Parameters.AddWithValue("$pinned",pinned?1:0); insertPage.Parameters.AddWithValue("$now",now.ToString("O"));
+        insertPage.Parameters.AddWithValue("$sort",sort); insertPage.Parameters.AddWithValue("$pinned",pinned?1:0); insertPage.Parameters.AddWithValue("$paperStyle",paperStyle); insertPage.Parameters.AddWithValue("$now",now.ToString("O"));
         await insertPage.ExecuteNonQueryAsync(cancellationToken);
 
         var objectCmd=connection.CreateCommand(); objectCmd.Transaction=(SqliteTransaction)transaction;
@@ -180,9 +194,14 @@ public sealed class PageRepository(SqliteDataStore store)
         {
             while(await reader.ReadAsync(cancellationToken)) rows.Add((reader.GetString(0),reader.GetString(1),reader.GetDouble(2),reader.GetDouble(3),reader.GetDouble(4),reader.GetDouble(5),reader.GetInt32(6),reader.GetString(7),reader.GetString(8),reader.GetInt32(9),reader.GetInt32(10),reader.GetInt32(11)));
         }
+        // Generate every new object id before inserting. Embedded shapes store their
+        // parent content-object id in style_json, so a page copy must remap that id or
+        // the shape will detach from its text/table/image parent on the copied page.
+        var objectIdMap = rows.ToDictionary(row => row.OldId, _ => Guid.NewGuid().ToString("N"), StringComparer.Ordinal);
         foreach(var row in rows)
         {
-            var newObjectId=Guid.NewGuid().ToString("N");
+            var newObjectId=objectIdMap[row.OldId];
+            var style = RemapShapeParentStyle(row.Type, row.Style, objectIdMap);
             var ins=connection.CreateCommand(); ins.Transaction=(SqliteTransaction)transaction;
             ins.CommandText="""
                 INSERT INTO content_objects(id,page_id,type,x,y,width,height,z_index,payload,style_json,is_todo,todo_completed,is_important,local_version,created_at,updated_at)
@@ -190,7 +209,7 @@ public sealed class PageRepository(SqliteDataStore store)
                 """;
             ins.Parameters.AddWithValue("$id",newObjectId); ins.Parameters.AddWithValue("$page",newPageId); ins.Parameters.AddWithValue("$type",row.Type);
             ins.Parameters.AddWithValue("$x",row.X); ins.Parameters.AddWithValue("$y",row.Y); ins.Parameters.AddWithValue("$w",row.W); ins.Parameters.AddWithValue("$h",row.H); ins.Parameters.AddWithValue("$z",row.Z);
-            ins.Parameters.AddWithValue("$payload",row.Payload); ins.Parameters.AddWithValue("$style",row.Style); ins.Parameters.AddWithValue("$todo",row.Todo); ins.Parameters.AddWithValue("$done",row.Done); ins.Parameters.AddWithValue("$important",row.Important); ins.Parameters.AddWithValue("$now",now.ToString("O"));
+            ins.Parameters.AddWithValue("$payload",row.Payload); ins.Parameters.AddWithValue("$style",style); ins.Parameters.AddWithValue("$todo",row.Todo); ins.Parameters.AddWithValue("$done",row.Done); ins.Parameters.AddWithValue("$important",row.Important); ins.Parameters.AddWithValue("$now",now.ToString("O"));
             await ins.ExecuteNonQueryAsync(cancellationToken);
             var idx=connection.CreateCommand(); idx.Transaction=(SqliteTransaction)transaction;
             idx.CommandText="INSERT INTO search_fts(object_id,page_id,source,text) SELECT $newId,$newPage,source,text FROM search_fts WHERE object_id=$oldId;";
@@ -200,8 +219,28 @@ public sealed class PageRepository(SqliteDataStore store)
         ink.CommandText="INSERT INTO ink_layers(page_id,isf_data,updated_at) SELECT $newPage,isf_data,$now FROM ink_layers WHERE page_id=$source;";
         ink.Parameters.AddWithValue("$newPage",newPageId); ink.Parameters.AddWithValue("$source",sourcePageId); ink.Parameters.AddWithValue("$now",now.ToString("O")); await ink.ExecuteNonQueryAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        return new Page { Id=newPageId,SectionId=targetSectionId,Title=newTitle,SortOrder=sort,IsPinned=pinned,CreatedAt=now,UpdatedAt=now };
+        return new Page { Id=newPageId,SectionId=targetSectionId,Title=newTitle,SortOrder=sort,IsPinned=pinned,PaperStyle=paperStyle,CreatedAt=now,UpdatedAt=now };
     }
+
+
+    private static string RemapShapeParentStyle(string type, string style, IReadOnlyDictionary<string, string> idMap)
+    {
+        if (!string.Equals(type, "Shape", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(style)) return style;
+        try
+        {
+            var meta = JsonSerializer.Deserialize<ShapeLayerMetadata>(style);
+            if (meta?.ParentObjectId is not { Length: > 0 } oldParentId) return style;
+            return idMap.TryGetValue(oldParentId, out var newParentId)
+                ? JsonSerializer.Serialize(new ShapeLayerMetadata(newParentId))
+                : JsonSerializer.Serialize(new ShapeLayerMetadata(null));
+        }
+        catch
+        {
+            return style;
+        }
+    }
+
+    private sealed record ShapeLayerMetadata(string? ParentObjectId);
 
     private async Task<int> GetNextSortOrderAsync(string sectionId, CancellationToken cancellationToken)
     {
@@ -223,8 +262,9 @@ public sealed class PageRepository(SqliteDataStore store)
         SortOrder = reader.GetInt32(5),
         IsPinned = reader.GetInt32(6) != 0,
         IsDeleted = reader.GetInt32(7) != 0,
-        LocalVersion = reader.GetInt32(8),
-        CreatedAt = DateTimeOffset.Parse(reader.GetString(9)),
-        UpdatedAt = DateTimeOffset.Parse(reader.GetString(10))
+        PaperStyle = reader.GetString(8),
+        LocalVersion = reader.GetInt32(9),
+        CreatedAt = DateTimeOffset.Parse(reader.GetString(10)),
+        UpdatedAt = DateTimeOffset.Parse(reader.GetString(11))
     };
 }

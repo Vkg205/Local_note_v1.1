@@ -22,6 +22,12 @@ public sealed class ShapePresenter : FrameworkElement
     public Color FillColor { get; set; } = Color.FromArgb(24, 108, 42, 165);
     public double StrokeThickness { get; set; } = 2.0;
 
+    // Line/arrow need to remember the direction in which the user dragged.
+    // Old documents did not persist this metadata; their legacy rendering was
+    // bottom-left -> top-right, which is kept as the default.
+    public bool StartAtRight { get; set; }
+    public bool StartAtBottom { get; set; } = true;
+
     public void Update(ShapeKind kind, Color stroke, Color fill, double thickness)
     {
         Kind = kind;
@@ -31,24 +37,39 @@ public sealed class ShapePresenter : FrameworkElement
         InvalidateVisual();
     }
 
+    public void UpdateDirection(bool startAtRight, bool startAtBottom)
+    {
+        StartAtRight = startAtRight;
+        StartAtBottom = startAtBottom;
+        InvalidateVisual();
+    }
+
     protected override void OnRender(DrawingContext dc)
     {
         base.OnRender(dc);
         var w = Math.Max(1, ActualWidth);
         var h = Math.Max(1, ActualHeight);
         var t = Math.Max(0.5, StrokeThickness);
-        var pen = new Pen(new SolidColorBrush(StrokeColor), t) { LineJoin = PenLineJoin.Round, StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round };
+        var pen = new Pen(new SolidColorBrush(StrokeColor), t)
+        {
+            LineJoin = PenLineJoin.Round,
+            StartLineCap = PenLineCap.Round,
+            EndLineCap = PenLineCap.Round
+        };
         var fill = new SolidColorBrush(FillColor);
         var pad = Math.Max(4, t + 2);
         var rect = new Rect(pad, pad, Math.Max(1, w - pad * 2), Math.Max(1, h - pad * 2));
 
+        var lineStart = new Point(StartAtRight ? w - pad : pad, StartAtBottom ? h - pad : pad);
+        var lineEnd = new Point(StartAtRight ? pad : w - pad, StartAtBottom ? pad : h - pad);
+
         switch (Kind)
         {
             case ShapeKind.Line:
-                dc.DrawLine(pen, new Point(pad, h - pad), new Point(w - pad, pad));
+                dc.DrawLine(pen, lineStart, lineEnd);
                 break;
             case ShapeKind.Arrow:
-                DrawArrow(dc, pen, new Point(pad, h - pad), new Point(w - pad, pad));
+                DrawArrow(dc, pen, lineStart, lineEnd);
                 break;
             case ShapeKind.Rectangle:
                 dc.DrawRectangle(fill, pen, rect);
@@ -73,7 +94,8 @@ public sealed class ShapePresenter : FrameworkElement
                 break;
             case ShapeKind.Flowchart:
                 dc.DrawRoundedRectangle(fill, pen, rect, 10, 10);
-                dc.DrawLine(new Pen(new SolidColorBrush(Color.FromArgb(120, StrokeColor.R, StrokeColor.G, StrokeColor.B)), Math.Max(1, t * 0.7)),
+                dc.DrawLine(
+                    new Pen(new SolidColorBrush(Color.FromArgb(120, StrokeColor.R, StrokeColor.G, StrokeColor.B)), Math.Max(1, t * 0.7)),
                     new Point(rect.Left + rect.Width * 0.08, rect.Top + rect.Height * 0.28),
                     new Point(rect.Right - rect.Width * 0.08, rect.Top + rect.Height * 0.28));
                 break;

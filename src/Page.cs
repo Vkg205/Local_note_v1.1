@@ -10,6 +10,7 @@ public sealed class Page
     public int SortOrder { get; set; }
     public bool IsPinned { get; set; }
     public bool IsDeleted { get; set; }
+    public string PaperStyle { get; set; } = "Blank";
     public int LocalVersion { get; set; } = 1;
     public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset UpdatedAt { get; set; }

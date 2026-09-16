@@ -105,6 +105,21 @@ public sealed class ContentObjectRepository(SqliteDataStore store)
         await transaction.CommitAsync();
     }
 
+
+    public async Task DeleteAllForPageAsync(string pageId)
+    {
+        await using var connection = store.CreateConnection();
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        var search = connection.CreateCommand(); search.Transaction = (SqliteTransaction)transaction;
+        search.CommandText = "DELETE FROM search_fts WHERE page_id=$page;"; search.Parameters.AddWithValue("$page", pageId);
+        await search.ExecuteNonQueryAsync();
+        var objects = connection.CreateCommand(); objects.Transaction = (SqliteTransaction)transaction;
+        objects.CommandText = "DELETE FROM content_objects WHERE page_id=$page;"; objects.Parameters.AddWithValue("$page", pageId);
+        await objects.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+    }
+
     private static string ResolveSearchText(ContentObject item)
     {
         if (!string.IsNullOrWhiteSpace(item.SearchText)) return item.SearchText.Trim();

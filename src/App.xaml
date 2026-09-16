@@ -174,10 +174,13 @@
                             <Border Grid.Row="0" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrushLocal}" BorderThickness="0,0,0,1">
                                 <TabPanel IsItemsHost="True" Margin="10,0,0,0" VerticalAlignment="Bottom"/>
                             </Border>
-                            <Border Grid.Row="1" Background="{DynamicResource RibbonBackgroundBrush}" BorderBrush="{DynamicResource BorderBrushLocal}" BorderThickness="0,0,0,1">
+                            <Border x:Name="RibbonContentHost" Grid.Row="1" Background="{DynamicResource RibbonBackgroundBrush}" BorderBrush="{DynamicResource BorderBrushLocal}" BorderThickness="0,0,0,1">
                                 <ContentPresenter ContentSource="SelectedContent"/>
                             </Border>
                         </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="Tag" Value="Compact"><Setter TargetName="RibbonContentHost" Property="Visibility" Value="Collapsed"/></Trigger>
+                        </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>

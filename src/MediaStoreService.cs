@@ -19,8 +19,15 @@ public sealed class MediaStoreService(string vaultRoot)
         {
             input.Position = 0;
             var temp = destination + ".tmp-" + Guid.NewGuid().ToString("N");
-            await using (var output = File.Create(temp)) await input.CopyToAsync(output, cancellationToken);
-            File.Move(temp, destination, false);
+            try
+            {
+                await using (var output = File.Create(temp)) await input.CopyToAsync(output, cancellationToken);
+                File.Move(temp, destination, false);
+            }
+            finally
+            {
+                try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+            }
         }
         return relative.Replace('\\', '/');
     }

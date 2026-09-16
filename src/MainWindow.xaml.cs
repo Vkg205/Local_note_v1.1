@@ -1,15 +1,18 @@
 using System.ComponentModel;
 using System.IO;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using LocalNote.App.Controls;
 using LocalNote.App.Dialogs;
 using LocalNote.App.Services;
 using LocalNote.App.ViewModels;
 using LocalNote.Domain.Entities;
+using NotePage = LocalNote.Domain.Entities.Page;
 using LocalNote.Storage.Services;
 using Microsoft.Win32;
 
@@ -22,16 +25,14 @@ public partial class MainWindow : Window
     private bool _allowClose;
     private bool _navigationVisible = true;
     private bool _pagesVisible = true;
-    private bool _ribbonCollapsed;
+    private RibbonDisplayMode _ribbonMode = RibbonDisplayMode.Expanded;
     private bool _focusMode;
-    private const double RibbonSafeMinHeight = 106;
-    private const double RibbonDefaultHeight = 112;
-    private const double RibbonMaxHeight = 170;
+    private const double RibbonExpandedHeight = 106;
+    private const double RibbonCompactHeight = 30;
     private const double PageHeaderSafeMinHeight = 60;
     private const double PageHeaderDefaultHeight = 66;
     private const double PageHeaderMaxHeight = 120;
 
-    private GridLength _lastRibbonHeight = new(RibbonDefaultHeight);
     private GridLength _lastPageHeaderHeight = new(PageHeaderDefaultHeight);
     private GridLength _lastNavigationWidth = new(220);
     private GridLength _lastPagesWidth = new(276);
@@ -44,20 +45,37 @@ public partial class MainWindow : Window
     private Color _tableBorderColor = Color.FromRgb(221, 214, 225);
     private Color _shapeStrokeColor = Color.FromRgb(108, 42, 165);
     private Color _shapeFillColor = Color.FromRgb(189, 155, 224);
+    private readonly DispatcherTimer _statusResetTimer = new() { Interval = TimeSpan.FromSeconds(4) };
+    private bool _syncingShapeToolbar;
+    private bool _newPageTitlePending;
+    private int _searchRequestVersion;
+    private bool _syncingPaperStyle;
 
     public MainWindow()
     {
         InitializeComponent(); DataContext = _viewModel;
-        Loaded += async (_, _) => { await RestoreUiLayoutAsync(); await _viewModel.InitializeAsync(); await LoadActivePageAsync(); };
+        _viewModel.BeforeVaultSwitchAsync = () => CanvasView.FlushAsync();
+        _statusResetTimer.Tick += (_, _) => { _statusResetTimer.Stop(); if (!_viewModel.StatusText.Contains("失败") && !_viewModel.StatusText.Contains("错误")) _viewModel.StatusText = "准备就绪"; };
+        _viewModel.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(MainViewModel.StatusText)) Dispatcher.Invoke(UpdateStatusVisual); };
+        _viewModel.NewPageCreated += (_, _) => Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => { _newPageTitlePending = true; PageTitleBox.Focus(); PageTitleBox.SelectAll(); }));
+        Loaded += async (_, _) => { await RestoreUiLayoutAsync(); await _viewModel.InitializeAsync(); await LoadActivePageAsync(); UpdateStatusVisual(); };
         _viewModel.ActivePageChanged += async (_, _) =>
         {
             var version = Interlocked.Increment(ref _pageLoadVersion);
-            await CanvasView.FlushAsync(); if (version != _pageLoadVersion) return;
-            await LoadActivePageAsync();
-            if (_pendingHighlightObjectId is { } id) { CanvasView.HighlightObject(id); _pendingHighlightObjectId = null; }
+            try
+            {
+                if (_viewModel.IsVaultOpen) await CanvasView.FlushAsync();
+                if (version != _pageLoadVersion) return;
+                await LoadActivePageAsync();
+                if (_pendingHighlightObjectId is { } id) { CanvasView.HighlightObject(id); _pendingHighlightObjectId = null; }
+            }
+            catch (Exception ex)
+            {
+                _viewModel.StatusText = $"页面切换失败：{ex.Message}";
+            }
         };
         CanvasView.StatusChanged += (_, text) => _viewModel.StatusText = text;
-        CanvasView.DirtyChanged += (_, _) => _viewModel.StatusText = $"已自动保存 · {DateTime.Now:HH:mm:ss}";
+        CanvasView.DirtyChanged += (_, _) => Dispatcher.Invoke(() => SaveStatusText.Text = $"已保存 · {DateTime.Now:HH:mm:ss}");
         CanvasView.ToolChanged += UpdateToolUi;
         CanvasView.SelectionChanged += UpdateSelectionUi;
         CanvasView.ZoomChanged += zoom => Dispatcher.Invoke(() => ZoomResetButton.Content = $"{zoom:P0}");
@@ -65,8 +83,37 @@ public partial class MainWindow : Window
         Closing += MainWindow_Closing;
     }
 
-    private async Task LoadActivePageAsync() =>
-        await CanvasView.BindAsync(_viewModel.SelectedPage?.Id, _viewModel.ContentRepository, _viewModel.InkRepository, _viewModel.MediaStore);
+    private async Task LoadActivePageAsync()
+    {
+        var page = _viewModel.SelectedPage;
+        await CanvasView.BindAsync(page?.Id, _viewModel.ContentRepository, _viewModel.InkRepository, _viewModel.MediaStore);
+
+        var style = ParsePaperStyle(page?.PaperStyle);
+        _syncingPaperStyle = true;
+        try
+        {
+            PaperStyleCombo.SelectedIndex = style switch
+            {
+                PaperStyle.Grid => 1,
+                PaperStyle.Lines => 2,
+                PaperStyle.Dots => 3,
+                _ => 0
+            };
+        }
+        finally
+        {
+            _syncingPaperStyle = false;
+        }
+        CanvasView.SetPaperStyle(style, notify: false);
+    }
+
+    private static PaperStyle ParsePaperStyle(string? value) => value switch
+    {
+        "Grid" => PaperStyle.Grid,
+        "Lines" => PaperStyle.Lines,
+        "Dots" => PaperStyle.Dots,
+        _ => PaperStyle.Blank
+    };
 
     private async void AddText_Click(object sender, RoutedEventArgs e)
     {
@@ -100,7 +147,7 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowOperationError("插入附件失败", ex); }
     }
 
-    private async void DeleteObject_Click(object sender, RoutedEventArgs e) => await CanvasView.DeleteSelectedAsync();
+    private void DeleteObject_Click(object sender, RoutedEventArgs e) => RunUiTask(CanvasView.DeleteSelectedAsync(), "删除对象");
     private void ClearInk_Click(object sender, RoutedEventArgs e)
     {
         if (!RequirePage("清除墨迹")) return;
@@ -113,6 +160,7 @@ public partial class MainWindow : Window
     private void HighlighterTool_Click(object sender, RoutedEventArgs e) => CanvasView.SetTool(CanvasTool.Highlighter);
     private void EraserTool_Click(object sender, RoutedEventArgs e) => CanvasView.SetTool(CanvasTool.Eraser);
     private void InkSelectTool_Click(object sender, RoutedEventArgs e) => CanvasView.SetTool(CanvasTool.InkSelect);
+    private void ShapeTool_Click(object sender, RoutedEventArgs e) => CanvasView.SetTool(CanvasTool.Shape);
     private void InkColor_Click(object sender, RoutedEventArgs e)
     {
         if (!TryPickColor("墨迹颜色", _inkColor, out var color)) return;
@@ -129,7 +177,7 @@ public partial class MainWindow : Window
 
     private void ShapeKindCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded || ShapeKindCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
+        if (_syncingShapeToolbar || !IsLoaded || ShapeKindCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
         if (Enum.TryParse<ShapeKind>(tag, true, out var kind)) CanvasView.SetShapeKind(kind);
     }
 
@@ -151,13 +199,13 @@ public partial class MainWindow : Window
 
     private void ShapeThicknessCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded || ShapeThicknessCombo.SelectedItem is not ComboBoxItem item || !double.TryParse(item.Content?.ToString(), out var size)) return;
+        if (_syncingShapeToolbar || !IsLoaded || ShapeThicknessCombo.SelectedItem is not ComboBoxItem item || !double.TryParse(item.Content?.ToString(), out var size)) return;
         CanvasView.SetShapeThickness(size);
         _viewModel.StatusText = $"形状线宽：{size:0.#}";
     }
 
-    private void Undo_Click(object sender, RoutedEventArgs e) => CanvasView.UndoRichText();
-    private void Redo_Click(object sender, RoutedEventArgs e) => CanvasView.RedoRichText();
+    private void Undo_Click(object sender, RoutedEventArgs e) => RunUiTask(CanvasView.UndoAsync(), "撤销");
+    private void Redo_Click(object sender, RoutedEventArgs e) => RunUiTask(CanvasView.RedoAsync(), "重做");
     private void Bold_Click(object sender, RoutedEventArgs e) => CanvasView.ToggleBold();
     private void Italic_Click(object sender, RoutedEventArgs e) => CanvasView.ToggleItalic();
     private void Underline_Click(object sender, RoutedEventArgs e) => CanvasView.ToggleUnderline();
@@ -185,7 +233,7 @@ public partial class MainWindow : Window
     }
 
     private void ToggleTodo_Click(object sender, RoutedEventArgs e) => CanvasView.ToggleParagraphTodo();
-    private async void ToggleImportant_Click(object sender, RoutedEventArgs e) => await CanvasView.ToggleImportantSelectedAsync();
+    private void ToggleImportant_Click(object sender, RoutedEventArgs e) => RunUiTask(CanvasView.ToggleImportantSelectedAsync(), "切换重要标记");
     private void Strikethrough_Click(object sender, RoutedEventArgs e) => CanvasView.ToggleStrikethrough();
     private void ClearFormatting_Click(object sender, RoutedEventArgs e) => CanvasView.ClearTextFormatting();
     private void Superscript_Click(object sender, RoutedEventArgs e) => CanvasView.ToggleSuperscript();
@@ -223,15 +271,45 @@ public partial class MainWindow : Window
     private void FitContent_Click(object sender, RoutedEventArgs e) => CanvasView.FitToContent();
     private void PaperStyleCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded) return;
-        CanvasView.SetPaperStyle(PaperStyleCombo.SelectedIndex switch { 1 => PaperStyle.Grid, 2 => PaperStyle.Lines, 3 => PaperStyle.Dots, _ => PaperStyle.Blank });
+        if (!IsLoaded || _syncingPaperStyle) return;
+        if (_viewModel.SelectedPage is null)
+        {
+            _viewModel.StatusText = "请先选择页面";
+            return;
+        }
+
+        var style = PaperStyleCombo.SelectedIndex switch
+        {
+            1 => PaperStyle.Grid,
+            2 => PaperStyle.Lines,
+            3 => PaperStyle.Dots,
+            _ => PaperStyle.Blank
+        };
+        CanvasView.SetPaperStyle(style);
+        RunUiTask(_viewModel.UpdateSelectedPagePaperStyleAsync(style.ToString()), "保存纸张样式");
     }
 
-    private async void SearchBox_TextChanged(object sender, TextChangedEventArgs e) => await RefreshSearchAsync();
-    private async void SearchScopeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (IsLoaded) await RefreshSearchAsync(); }
-    private async Task RefreshSearchAsync()
+    private async void SearchBox_TextChanged(object sender, TextChangedEventArgs e) => await RefreshSearchAsync(debounce: true);
+    private async void SearchScopeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (IsLoaded) await RefreshSearchAsync(debounce: false); }
+    private async Task RefreshSearchAsync(bool debounce)
     {
-        if (_viewModel.SearchRepository is null || string.IsNullOrWhiteSpace(SearchBox.Text)) { SearchPopup.IsOpen = false; return; }
+        var requestVersion = Interlocked.Increment(ref _searchRequestVersion);
+        var query = SearchBox.Text.Trim();
+        if (_viewModel.SearchRepository is null || string.IsNullOrWhiteSpace(query))
+        {
+            SearchResults.ItemsSource = null;
+            SearchPopup.IsOpen = false;
+            return;
+        }
+
+        // Typing used to issue one SQLite query per keystroke. Slower queries could
+        // finish after newer ones and overwrite the result list with stale data.
+        if (debounce)
+        {
+            await Task.Delay(240);
+            if (requestVersion != _searchRequestVersion) return;
+        }
+
         string? notebook = null, section = null, page = null;
         switch (SearchScopeCombo.SelectedIndex)
         {
@@ -239,38 +317,93 @@ public partial class MainWindow : Window
             case 2: section = _viewModel.SelectedSection?.Id; break;
             case 3: page = _viewModel.SelectedPage?.Id; break;
         }
-        var results = await _viewModel.SearchRepository.SearchAsync(SearchBox.Text.Trim(), notebook, section, page);
-        SearchResults.ItemsSource = results; SearchPopup.IsOpen = results.Count > 0;
+        try
+        {
+            var results = await _viewModel.SearchRepository.SearchAsync(query, notebook, section, page);
+            if (requestVersion != _searchRequestVersion) return;
+            SearchResults.ItemsSource = results;
+            SearchPopup.IsOpen = results.Count > 0;
+        }
+        catch (Exception ex)
+        {
+            if (requestVersion != _searchRequestVersion) return;
+            SearchPopup.IsOpen = false;
+            _viewModel.StatusText = $"搜索失败：{ex.Message}";
+        }
     }
-    private async void SearchResults_DoubleClick(object sender, MouseButtonEventArgs e)
+    private void SearchResults_DoubleClick(object sender, MouseButtonEventArgs e)
     {
         if (SearchResults.SelectedItem is not SearchHit hit) return;
-        SearchPopup.IsOpen = false; _pendingHighlightObjectId = hit.ObjectId; await _viewModel.NavigateToPageAsync(hit.PageId);
+        SearchPopup.IsOpen = false;
+        RunUiTask(OpenSearchResultAsync(hit), "打开搜索结果");
     }
 
-    private async void PageTitleBox_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e) => await _viewModel.RenameSelectedPageInlineAsync(PageTitleBox.Text);
-    private async void PageTitleBox_PreviewKeyDown(object sender, KeyEventArgs e)
+    private async Task OpenSearchResultAsync(SearchHit hit)
     {
-        if (e.Key != Key.Enter) return; e.Handled = true; await _viewModel.RenameSelectedPageInlineAsync(PageTitleBox.Text); CanvasView.Focus();
+        _pendingHighlightObjectId = hit.ObjectId;
+        await _viewModel.NavigateToPageAsync(hit.PageId);
     }
-    private async void PinPage_Click(object sender, RoutedEventArgs e)
+
+    private void PageTitleBox_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        RunUiTask(SavePageTitleOnBlurAsync(), "保存页面标题");
+    }
+
+    private async Task SavePageTitleOnBlurAsync()
+    {
+        await _viewModel.RenameSelectedPageInlineAsync(PageTitleBox.Text);
+        if (!PageTitleBox.IsKeyboardFocusWithin) _newPageTitlePending = false;
+    }
+
+    private void PageTitleBox_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        e.Handled = true;
+        RunUiTask(CommitPageTitleAsync(), "保存页面标题");
+    }
+
+    private async Task CommitPageTitleAsync()
+    {
+        await _viewModel.RenameSelectedPageInlineAsync(PageTitleBox.Text);
+        if (_newPageTitlePending)
+        {
+            _newPageTitlePending = false;
+            await CanvasView.AddTextAsync();
+        }
+        else CanvasView.Focus();
+    }
+    private void PinPage_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel.SelectedPage is null) { _viewModel.StatusText = "请先选择页面"; return; }
-        await _viewModel.ToggleSelectedPagePinAsync();
+        RunUiTask(_viewModel.ToggleSelectedPagePinAsync(), "切换页面置顶");
     }
-    private async void MovePage_Click(object sender, RoutedEventArgs e)
+    private void MovePage_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel.SelectedPage is null) { _viewModel.StatusText = "请先选择要移动的页面"; return; }
-        var destination = await SelectPageDestinationAsync("移动页面到…"); if (destination is null) return;
-        if (destination.SectionId == _viewModel.SelectedSection?.Id) { _viewModel.StatusText = "页面已在当前分区"; return; }
-        await CanvasView.FlushAsync(); await _viewModel.MoveSelectedPageAsync(destination.SectionId);
+        RunUiTask(MoveSelectedPageFromMenuAsync(), "移动页面");
     }
 
-    private async void CopyPage_Click(object sender, RoutedEventArgs e)
+    private async Task MoveSelectedPageFromMenuAsync()
+    {
+        var destination = await SelectPageDestinationAsync("移动页面到…");
+        if (destination is null) return;
+        if (destination.SectionId == _viewModel.SelectedSection?.Id) { _viewModel.StatusText = "页面已在当前分区"; return; }
+        await CanvasView.FlushAsync();
+        await _viewModel.MoveSelectedPageAsync(destination.SectionId);
+    }
+
+    private void CopyPage_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel.SelectedPage is null) { _viewModel.StatusText = "请先选择要复制的页面"; return; }
-        var destination = await SelectPageDestinationAsync("复制页面到…"); if (destination is null) return;
-        await CanvasView.FlushAsync(); await _viewModel.CopySelectedPageAsync(destination.SectionId);
+        RunUiTask(CopySelectedPageFromMenuAsync(), "复制页面");
+    }
+
+    private async Task CopySelectedPageFromMenuAsync()
+    {
+        var destination = await SelectPageDestinationAsync("复制页面到…");
+        if (destination is null) return;
+        await CanvasView.FlushAsync();
+        await _viewModel.CopySelectedPageAsync(destination.SectionId);
     }
 
     private async Task<PageDestination?> SelectPageDestinationAsync(string title)
@@ -286,6 +419,27 @@ public partial class MainWindow : Window
         window.ShowDialog(); return result;
     }
 
+
+    private void PageList_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        var item = FindAncestor<ListBoxItem>(e.OriginalSource as DependencyObject);
+        if (item is null) return;
+        item.IsSelected = true; item.Focus();
+    }
+
+    private void PageMore_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.DataContext is not NotePage page) return;
+        _viewModel.SelectedPage = page;
+        var menu = new ContextMenu();
+        var pin = new MenuItem { Header = page.IsPinned ? "取消置顶" : "置顶页面" }; pin.Click += PinPage_Click;
+        var move = new MenuItem { Header = "移动到…" }; move.Click += MovePage_Click;
+        var copy = new MenuItem { Header = "复制到…" }; copy.Click += CopyPage_Click;
+        var delete = new MenuItem { Header = "移到回收站" }; delete.Click += (_, _) => { if (_viewModel.DeletePageCommand.CanExecute(null)) _viewModel.DeletePageCommand.Execute(null); };
+        menu.Items.Add(pin); menu.Items.Add(new Separator()); menu.Items.Add(move); menu.Items.Add(copy); menu.Items.Add(new Separator()); menu.Items.Add(delete);
+        menu.PlacementTarget = element; menu.Placement = PlacementMode.Bottom; menu.IsOpen = true;
+        e.Handled = true;
+    }
 
     private void ToggleNavigation_Click(object sender, RoutedEventArgs e)
     {
@@ -310,26 +464,30 @@ public partial class MainWindow : Window
     private void ToggleRibbon_Click(object sender, RoutedEventArgs e)
     {
         if (_focusMode) { _viewModel.StatusText = "专注模式下工具栏已隐藏；按 F11 退出后再调整"; return; }
-        if (!_ribbonCollapsed)
+        _ribbonMode = _ribbonMode switch
         {
-            if (RibbonRow.Height.Value >= RibbonSafeMinHeight) _lastRibbonHeight = RibbonRow.Height;
-            _ribbonCollapsed = true;
-            RibbonTabs.Visibility = Visibility.Collapsed;
-            RibbonSplitter.Visibility = Visibility.Collapsed;
-            RibbonRow.MinHeight = 0;
-            RibbonRow.Height = new GridLength(0);
-        }
-        else
+            RibbonDisplayMode.Expanded => RibbonDisplayMode.Compact,
+            RibbonDisplayMode.Compact => RibbonDisplayMode.Collapsed,
+            _ => RibbonDisplayMode.Expanded
+        };
+        ApplyRibbonMode();
+    }
+
+    private void ApplyRibbonMode()
+    {
+        switch (_ribbonMode)
         {
-            _ribbonCollapsed = false;
-            RibbonRow.MinHeight = RibbonSafeMinHeight;
-            RibbonTabs.Visibility = Visibility.Visible;
-            RibbonSplitter.Visibility = Visibility.Visible;
-            var restored = Math.Clamp(_lastRibbonHeight.Value <= 0 ? RibbonDefaultHeight : _lastRibbonHeight.Value, RibbonSafeMinHeight, RibbonMaxHeight);
-            RibbonRow.Height = new GridLength(restored);
+            case RibbonDisplayMode.Expanded:
+                RibbonTabs.Visibility = Visibility.Visible; RibbonTabs.Tag = "Expanded"; RibbonRow.Height = new GridLength(RibbonExpandedHeight);
+                RibbonCompactButton.Content = "⌃ 工具"; _viewModel.StatusText = "工具栏：展开"; break;
+            case RibbonDisplayMode.Compact:
+                RibbonTabs.Visibility = Visibility.Visible; RibbonTabs.Tag = "Compact"; RibbonRow.Height = new GridLength(RibbonCompactHeight);
+                RibbonCompactButton.Content = "─ 工具"; _viewModel.StatusText = "工具栏：紧凑"; break;
+            default:
+                RibbonTabs.Visibility = Visibility.Collapsed; RibbonRow.Height = new GridLength(0);
+                RibbonCompactButton.Content = "⌄ 工具"; _viewModel.StatusText = "工具栏已隐藏 · 画布空间最大化"; break;
         }
-        RibbonCompactButton.Content = _ribbonCollapsed ? "⌄ 工具" : "⌃ 工具";
-        _viewModel.StatusText = _ribbonCollapsed ? "工具栏已折叠 · 画布空间增加" : "工具栏已展开";
+        RibbonSplitter.Visibility = _ribbonMode == RibbonDisplayMode.Collapsed ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void ToggleFocusMode_Click(object sender, RoutedEventArgs e)
@@ -337,46 +495,31 @@ public partial class MainWindow : Window
         _focusMode = !_focusMode;
         if (_focusMode)
         {
-            _lastRibbonHeight = RibbonRow.Height.Value > 0 ? RibbonRow.Height : _lastRibbonHeight;
             _lastPageHeaderHeight = PageHeaderRow.Height.Value > 0 ? PageHeaderRow.Height : _lastPageHeaderHeight;
             if (NavigationColumn.Width.Value > 0) _lastNavigationWidth = NavigationColumn.Width;
             if (PagesColumn.Width.Value > 0) _lastPagesWidth = PagesColumn.Width;
-            RibbonRow.MinHeight = 0;
-            RibbonTabs.Visibility = Visibility.Collapsed;
-            RibbonSplitter.Visibility = Visibility.Collapsed;
-            RibbonRow.Height = new GridLength(0);
-            SectionTabsRow.Height = new GridLength(0);
-            PageHeaderRow.MinHeight = 0;
-            PageHeaderRow.Height = new GridLength(0);
-            NavigationColumn.Width = new GridLength(0);
-            PagesColumn.Width = new GridLength(0);
-            NavigationPanel.Visibility = Visibility.Collapsed;
-            NavigationSplitter.Visibility = Visibility.Collapsed;
-            PagesSplitter.Visibility = Visibility.Collapsed;
-            StatusBarBorder.Visibility = Visibility.Collapsed;
-            FocusModeButton.Content = "⛶ 退出专注";
+            RibbonTabs.Visibility = Visibility.Collapsed; RibbonRow.Height = new GridLength(0); RibbonSplitter.Visibility = Visibility.Collapsed;
+            SectionTabsRow.Height = new GridLength(0); PageHeaderRow.MinHeight = 0; PageHeaderRow.Height = new GridLength(0);
+            NavigationColumn.Width = new GridLength(0); PagesColumn.Width = new GridLength(0);
+            NavigationPanel.Visibility = Visibility.Collapsed; NavigationSplitter.Visibility = Visibility.Collapsed; PagesSplitter.Visibility = Visibility.Collapsed;
+            StatusBarBorder.Visibility = Visibility.Collapsed; FocusModeButton.Content = "⛶ 退出专注";
             _viewModel.StatusText = "已进入专注模式 · 按 F11 或点击按钮退出";
         }
         else
         {
-            RibbonRow.MinHeight = RibbonSafeMinHeight;
-            RibbonTabs.Visibility = Visibility.Visible;
-            RibbonSplitter.Visibility = Visibility.Visible;
-            RibbonRow.Height = new GridLength(Math.Clamp(_lastRibbonHeight.Value > 0 ? _lastRibbonHeight.Value : RibbonDefaultHeight, RibbonSafeMinHeight, RibbonMaxHeight));
+            ApplyRibbonMode();
             SectionTabsRow.Height = new GridLength(38);
             PageHeaderRow.MinHeight = PageHeaderSafeMinHeight;
             PageHeaderRow.Height = _lastPageHeaderHeight.Value > 0 ? _lastPageHeaderHeight : new GridLength(PageHeaderDefaultHeight);
             if (_navigationVisible) { NavigationColumn.Width = _lastNavigationWidth; NavigationPanel.Visibility = Visibility.Visible; NavigationSplitter.Visibility = Visibility.Visible; }
             if (_pagesVisible) { PagesColumn.Width = _lastPagesWidth; PagesSplitter.Visibility = Visibility.Visible; }
-            StatusBarBorder.Visibility = Visibility.Visible;
-            FocusModeButton.Content = "⛶ 专注";
-            _viewModel.StatusText = "已退出专注模式";
+            StatusBarBorder.Visibility = Visibility.Visible; FocusModeButton.Content = "⛶ 专注"; _viewModel.StatusText = "已退出专注模式";
         }
     }
 
     private async void Backup_Click(object sender, RoutedEventArgs e)
     {
-        if (_viewModel.BackupService is null) { _viewModel.StatusText = "请先创建或打开本地 Vault"; return; } await CanvasView.FlushAsync();
+        if (_viewModel.BackupService is null) { _viewModel.StatusText = "请先创建或打开本地仓库"; return; } await CanvasView.FlushAsync();
         var dialog = new SaveFileDialog { Title = "创建 LocalNote 备份", Filter = "LocalNote 备份|*.lnbackup", FileName = $"LocalNote_{DateTime.Now:yyyyMMdd_HHmm}.lnbackup" };
         if (dialog.ShowDialog() != true) return;
         try { _viewModel.StatusText = "正在创建备份…"; await _viewModel.BackupService.CreateAsync(dialog.FileName); _viewModel.StatusText = "备份完成并通过 SHA-256 清单记录"; }
@@ -398,7 +541,7 @@ public partial class MainWindow : Window
 
     private async void Integrity_Click(object sender, RoutedEventArgs e)
     {
-        if (_viewModel.IntegrityService is null) { _viewModel.StatusText = "请先创建或打开本地 Vault"; return; } await CanvasView.FlushAsync();
+        if (_viewModel.IntegrityService is null) { _viewModel.StatusText = "请先创建或打开本地仓库"; return; } await CanvasView.FlushAsync();
         try
         {
             var report = await _viewModel.IntegrityService.CheckAsync();
@@ -418,7 +561,7 @@ public partial class MainWindow : Window
 
     private async void Trash_Click(object sender, RoutedEventArgs e)
     {
-        if (_viewModel.TrashRepository is null) { _viewModel.StatusText = "请先创建或打开本地 Vault"; return; }
+        if (_viewModel.TrashRepository is null) { _viewModel.StatusText = "请先创建或打开本地仓库"; return; }
         var items = await _viewModel.TrashRepository.GetAsync();
         var list = new ListBox { ItemsSource = items, Margin = new Thickness(12) };
         var restore = new Button { Content = "恢复所选", Style = (Style)FindResource("PrimaryButton"), Margin = new Thickness(4), Padding = new Thickness(14, 6, 14, 6) };
@@ -428,25 +571,53 @@ public partial class MainWindow : Window
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(10) };
         buttons.Children.Add(restore); buttons.Children.Add(empty); DockPanel.SetDock(buttons, Dock.Bottom); panel.Children.Add(buttons); panel.Children.Add(list);
         var window = new Window { Title = "LocalNote · 回收站", Owner = this, Width = 600, Height = 500, Content = panel, WindowStartupLocation = WindowStartupLocation.CenterOwner, Background = (Brush)FindResource("SurfaceBrush") };
-        restore.Click += async (_, _) => { if (list.SelectedItem is TrashEntry item) { await _viewModel.TrashRepository.RestoreAsync(item); window.Close(); await _viewModel.RefreshNavigationAsync(); _viewModel.StatusText = "已按原结构恢复"; } };
-        empty.Click += async (_, _) => { if (MessageBox.Show(window, "彻底清空回收站？此操作不可恢复。", "LocalNote", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes) { await _viewModel.TrashRepository.EmptyAsync(); window.Close(); await _viewModel.RefreshNavigationAsync(); } };
+        restore.Click += (_, _) =>
+        {
+            if (list.SelectedItem is not TrashEntry item) return;
+            RunUiTask(RestoreTrashItemAsync(item, window), "恢复回收站项目");
+        };
+        empty.Click += (_, _) =>
+        {
+            if (MessageBox.Show(window, "彻底清空回收站？此操作不可恢复。", "LocalNote", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+            RunUiTask(EmptyTrashAsync(window), "清空回收站");
+        };
         window.ShowDialog();
+    }
+
+    private async Task RestoreTrashItemAsync(TrashEntry item, Window window)
+    {
+        if (_viewModel.TrashRepository is null) return;
+        await _viewModel.TrashRepository.RestoreAsync(item);
+        window.Close();
+        await _viewModel.RefreshNavigationAsync();
+        _viewModel.StatusText = "已按原结构恢复";
+    }
+
+    private async Task EmptyTrashAsync(Window window)
+    {
+        if (_viewModel.TrashRepository is null) return;
+        await _viewModel.TrashRepository.EmptyAsync();
+        window.Close();
+        await _viewModel.RefreshNavigationAsync();
+        _viewModel.StatusText = "回收站已清空";
     }
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.F11) { ToggleFocusMode_Click(sender, e); e.Handled = true; return; }
+        if ((Keyboard.Modifiers & ModifierKeys.Control) != 0 && e.Key == Key.Z) { RunUiTask(CanvasView.UndoAsync(), "撤销"); e.Handled = true; return; }
+        if ((Keyboard.Modifiers & ModifierKeys.Control) != 0 && e.Key == Key.Y) { RunUiTask(CanvasView.RedoAsync(), "重做"); e.Handled = true; return; }
         if (e.Key == Key.Escape && Keyboard.FocusedElement is not TextBoxBase) { CanvasView.SetTool(CanvasTool.Select); e.Handled = true; return; }
         if ((Keyboard.Modifiers & ModifierKeys.Control) != 0 && e.Key == Key.D1 && Keyboard.FocusedElement is RichTextBox) { CanvasView.ToggleParagraphTodo(); e.Handled = true; return; }
         if ((Keyboard.Modifiers & ModifierKeys.Control) != 0 && e.Key == Key.F) { SearchBox.Focus(); SearchBox.SelectAll(); e.Handled = true; return; }
         if ((Keyboard.Modifiers & ModifierKeys.Control) != 0 && e.Key == Key.N && Keyboard.FocusedElement is not TextBoxBase)
         { if (_viewModel.AddPageCommand.CanExecute(null)) _viewModel.AddPageCommand.Execute(null); e.Handled = true; return; }
         if ((Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Alt)) == (ModifierKeys.Control | ModifierKeys.Alt) && e.Key == Key.T)
-        { _ = CanvasView.AddTableAsync(); e.Handled = true; return; }
+        { RunUiTask(CanvasView.AddTableAsync(), "插入表格"); e.Handled = true; return; }
         if ((Keyboard.Modifiers & ModifierKeys.Control) != 0 && e.Key == Key.D && Keyboard.FocusedElement is not TextBoxBase)
-        { _ = CanvasView.DuplicateSelectedAsync(); e.Handled = true; return; }
+        { RunUiTask(CanvasView.DuplicateSelectedAsync(), "创建副本"); e.Handled = true; return; }
         if (Keyboard.Modifiers == ModifierKeys.None && e.Key == Key.Delete && Keyboard.FocusedElement is not TextBoxBase)
-        { _ = CanvasView.DeleteSelectedAsync(); e.Handled = true; }
+        { RunUiTask(CanvasView.DeleteSelectedAsync(), "删除对象"); e.Handled = true; }
     }
 
     private async Task RestoreUiLayoutAsync()
@@ -454,18 +625,12 @@ public partial class MainWindow : Window
         try
         {
             var layout = await _userSettings.GetUiLayoutAsync();
-            _lastRibbonHeight = new GridLength(Math.Clamp(layout.RibbonHeight, RibbonSafeMinHeight, RibbonMaxHeight));
+            _ribbonMode = layout.RibbonMode;
             _lastPageHeaderHeight = new GridLength(Math.Clamp(layout.PageHeaderHeight, PageHeaderSafeMinHeight, PageHeaderMaxHeight));
             _lastNavigationWidth = new GridLength(Math.Clamp(layout.NavigationWidth, 150, 420));
             _lastPagesWidth = new GridLength(Math.Clamp(layout.PagesWidth, 180, 460));
-            _navigationVisible = layout.NavigationVisible;
-            _pagesVisible = layout.PagesVisible;
-            RibbonRow.MinHeight = RibbonSafeMinHeight;
-            RibbonRow.Height = _lastRibbonHeight;
-            _ribbonCollapsed = false;
-            RibbonTabs.Visibility = Visibility.Visible;
-            RibbonSplitter.Visibility = Visibility.Visible;
-            RibbonCompactButton.Content = "⌃ 工具";
+            _navigationVisible = layout.NavigationVisible; _pagesVisible = layout.PagesVisible;
+            ApplyRibbonMode();
             PageHeaderRow.Height = _lastPageHeaderHeight;
             NavigationColumn.Width = _navigationVisible ? _lastNavigationWidth : new GridLength(0);
             NavigationPanel.Visibility = _navigationVisible ? Visibility.Visible : Visibility.Collapsed;
@@ -483,13 +648,12 @@ public partial class MainWindow : Window
         {
             if (!_focusMode)
             {
-                if (RibbonRow.Height.Value >= RibbonSafeMinHeight) _lastRibbonHeight = RibbonRow.Height;
                 if (PageHeaderRow.Height.Value >= PageHeaderSafeMinHeight) _lastPageHeaderHeight = PageHeaderRow.Height;
                 if (NavigationColumn.Width.Value > 0) _lastNavigationWidth = NavigationColumn.Width;
                 if (PagesColumn.Width.Value > 0) _lastPagesWidth = PagesColumn.Width;
             }
             await _userSettings.SaveUiLayoutAsync(new UiLayoutSettings(
-                _lastRibbonHeight.Value, _lastPageHeaderHeight.Value, _lastNavigationWidth.Value, _lastPagesWidth.Value,
+                _ribbonMode, _lastPageHeaderHeight.Value, _lastNavigationWidth.Value, _lastPagesWidth.Value,
                 _navigationVisible, _pagesVisible));
         }
         catch { }
@@ -497,21 +661,53 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
-        if (_allowClose) return; e.Cancel = true;
-        try { await CanvasView.FlushAsync(); await SaveUiLayoutAsync(); await _viewModel.ShutdownAsync(); }
-        finally { _allowClose = true; Close(); }
+        if (_allowClose) return;
+        e.Cancel = true;
+        try
+        {
+            try
+            {
+                await CanvasView.FlushAsync();
+            }
+            catch (Exception ex)
+            {
+                var leave = MessageBox.Show(this,
+                    $"最后一次自动保存未能完成：\n{ex.Message}\n\n仍然退出吗？",
+                    "LocalNote · 保存失败", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                if (leave != MessageBoxResult.Yes)
+                {
+                    _viewModel.StatusText = "退出已取消 · 请检查磁盘或仓库状态后重试";
+                    return;
+                }
+            }
+
+            await SaveUiLayoutAsync();
+            try { await _viewModel.ShutdownAsync(); }
+            catch (Exception ex) { _viewModel.StatusText = $"关闭仓库时出现问题：{ex.Message}"; }
+            _allowClose = true;
+            Close();
+        }
+        catch (Exception ex)
+        {
+            _viewModel.StatusText = $"退出失败：{ex.Message}";
+        }
     }
 
     private void Exit_Click(object sender, RoutedEventArgs e) => Close();
-    private void About_Click(object sender, RoutedEventArgs e) => MessageBox.Show(this,
-        "LocalNote V0.7.5 Simplified Core\n\nWindows x64 · 纯本地单机\nOneNote 类 Ribbon / 自由画布 / 富文本 / 上下文表格工具 / 自定义调色板 / 图片与附件 / Ink / 标签 / 搜索 / 回收站 / 本地备份恢复\n\n当前仍为 P0 功能补齐阶段，不含云同步与整库加密。",
-        "关于 LocalNote", MessageBoxButton.OK, MessageBoxImage.Information);
+    private void About_Click(object sender, RoutedEventArgs e)
+    {
+        var version = GetType().Assembly.GetName().Version;
+        var displayVersion = version is null ? "0.8.5" : $"{version.Major}.{version.Minor}.{version.Build}";
+        MessageBox.Show(this,
+            $"LocalNote V{displayVersion}\n\nWindows x64 · 纯本地单机\n自由画布 / 富文本 / 表格 / 图片与附件 / Ink 与形状绘图层 / 段落待办 / 搜索 / 回收站 / 本地备份恢复\n\n当前不含云同步与整库加密。",
+            "关于 LocalNote", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
 
     private bool RequirePage(string action)
     {
         if (!_viewModel.IsVaultOpen)
         {
-            _viewModel.StatusText = $"{action}前，请先创建或打开本地 Vault";
+            _viewModel.StatusText = $"{action}前，请先创建或打开本地仓库";
             return false;
         }
         if (_viewModel.SelectedPage is null)
@@ -532,6 +728,7 @@ public partial class MainWindow : Window
             HighlighterToolToggle.IsChecked = tool == CanvasTool.Highlighter;
             EraserToolToggle.IsChecked = tool == CanvasTool.Eraser;
             InkSelectToolToggle.IsChecked = tool == CanvasTool.InkSelect;
+            ShapeToolToggle.IsChecked = tool == CanvasTool.Shape;
             CanvasModeText.Text = tool switch
             {
                 CanvasTool.Pen => "钢笔",
@@ -559,6 +756,7 @@ public partial class MainWindow : Window
                 _ => "已选择对象"
             };
 
+            if (item?.Type == ContentObjectType.Shape) SyncShapeToolbar(item);
             var tableSelected = item?.Type == ContentObjectType.Table;
             TableToolsTab.Visibility = tableSelected ? Visibility.Visible : Visibility.Collapsed;
             if (tableSelected)
@@ -572,6 +770,33 @@ public partial class MainWindow : Window
                 RibbonTabs.SelectedIndex = 0;
             }
         });
+    }
+
+    private void SyncShapeToolbar(ContentObject item)
+    {
+        _syncingShapeToolbar = true;
+        try
+        {
+            using var doc = JsonDocument.Parse(item.Payload);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("Stroke", out var strokeEl) && ColorConverter.ConvertFromString(strokeEl.GetString()) is Color stroke)
+            { _shapeStrokeColor = stroke; ShapeStrokeColorPreview.Background = new SolidColorBrush(stroke); }
+            if (root.TryGetProperty("Fill", out var fillEl) && ColorConverter.ConvertFromString(fillEl.GetString()) is Color fill)
+            { _shapeFillColor = fill; ShapeFillColorPreview.Background = new SolidColorBrush(fill); }
+            var kindText = root.TryGetProperty("Kind", out var kindEl) ? kindEl.GetString() : null;
+            if (Enum.TryParse<ShapeKind>(kindText, true, out var kind))
+            {
+                for (var i = 0; i < ShapeKindCombo.Items.Count; i++)
+                    if (ShapeKindCombo.Items[i] is ComboBoxItem c && string.Equals(c.Tag?.ToString(), kind.ToString(), StringComparison.OrdinalIgnoreCase)) { ShapeKindCombo.SelectedIndex = i; break; }
+            }
+            if (root.TryGetProperty("Thickness", out var tEl) && tEl.TryGetDouble(out var thickness))
+            {
+                for (var i = 0; i < ShapeThicknessCombo.Items.Count; i++)
+                    if (ShapeThicknessCombo.Items[i] is ComboBoxItem c && double.TryParse(c.Content?.ToString(), out var v) && Math.Abs(v - thickness) < 0.01) { ShapeThicknessCombo.SelectedIndex = i; break; }
+            }
+        }
+        catch { }
+        finally { _syncingShapeToolbar = false; }
     }
 
     private void TableRowAbove_Click(object sender, RoutedEventArgs e) => CanvasView.TableInsertRowAbove();
@@ -619,14 +844,14 @@ public partial class MainWindow : Window
         CanvasView.TableSetBorderColor(color);
     }
 
-    private async void SectionColor_Click(object sender, RoutedEventArgs e)
+    private void SectionColor_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel.SelectedSection is null) { _viewModel.StatusText = "请先选择分区"; return; }
         Color current;
         try { current = (Color)ColorConverter.ConvertFromString(_viewModel.SelectedSection.Color)!; }
         catch { current = Color.FromRgb(108, 42, 165); }
         if (!TryPickColor("分区颜色", current, out var color)) return;
-        await _viewModel.ChangeSelectedSectionColorAsync($"#{color.R:X2}{color.G:X2}{color.B:X2}");
+        RunUiTask(_viewModel.ChangeSelectedSectionColorAsync($"#{color.R:X2}{color.G:X2}{color.B:X2}"), "更新分区颜色");
     }
 
     private bool TryPickColor(string title, Color initial, out Color color)
@@ -639,6 +864,39 @@ public partial class MainWindow : Window
         }
         color = initial;
         return false;
+    }
+
+    private void UpdateStatusVisual()
+    {
+        var text = _viewModel.StatusText ?? string.Empty;
+        var color = text.Contains("失败", StringComparison.Ordinal) || text.Contains("错误", StringComparison.Ordinal) || text.Contains("无法", StringComparison.Ordinal)
+            ? Color.FromRgb(220, 38, 38)
+            : text.Contains("正在", StringComparison.Ordinal) || text.Contains("等待", StringComparison.Ordinal)
+                ? Color.FromRgb(217, 119, 6)
+                : text.Contains("完成", StringComparison.Ordinal) || text.Contains("已", StringComparison.Ordinal)
+                    ? Color.FromRgb(22, 163, 74)
+                    : Color.FromRgb(107, 114, 128);
+        StatusIndicator.Fill = new SolidColorBrush(color);
+        _statusResetTimer.Stop();
+        if (!text.Contains("失败", StringComparison.Ordinal) && !text.Contains("错误", StringComparison.Ordinal) && text != "准备就绪") _statusResetTimer.Start();
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
+    {
+        while (current is not null)
+        {
+            if (current is T found) return found;
+            current = VisualTreeHelper.GetParent(current);
+        }
+        return null;
+    }
+
+    private void RunUiTask(Task task, string action) => _ = ObserveUiTaskAsync(task, action);
+
+    private async Task ObserveUiTaskAsync(Task task, string action)
+    {
+        try { await task; }
+        catch (Exception ex) { ShowOperationError($"{action}失败", ex); }
     }
 
     private void ShowOperationError(string title, Exception ex)

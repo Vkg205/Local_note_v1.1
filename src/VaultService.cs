@@ -17,10 +17,13 @@ public sealed class VaultService
         CancellationToken cancellationToken = default)
     {
         var paths = new VaultPaths(rootPath);
-        paths.EnsureDirectories();
 
         if (File.Exists(paths.Manifest))
-            throw new InvalidOperationException("所选目录已经包含 LocalNote 仓库。请直接打开该仓库。 ");
+            throw new InvalidOperationException("所选目录已经包含 LocalNote 仓库。请直接打开该仓库。");
+        if (Directory.Exists(paths.Root) && Directory.EnumerateFileSystemEntries(paths.Root).Any())
+            throw new InvalidOperationException("创建本地仓库需要使用空目录。请选择一个空目录或新建目录，避免覆盖现有文件。");
+
+        paths.EnsureDirectories();
 
         var vault = new VaultInfo
         {

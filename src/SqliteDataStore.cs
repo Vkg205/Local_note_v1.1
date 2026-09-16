@@ -32,9 +32,54 @@ public sealed class SqliteDataStore
         await EnsureColumnAsync(connection, "content_objects", "is_todo", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(connection, "content_objects", "todo_completed", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(connection, "content_objects", "is_important", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnAsync(connection, "pages", "paper_style", "TEXT NOT NULL DEFAULT 'Blank'", cancellationToken);
+        await EnsureColumnAsync(connection, "notebooks", "deleted_by", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, "sections", "deleted_by", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, "pages", "deleted_by", "TEXT NULL", cancellationToken);
+
+        // Legacy databases only had an is_deleted flag.  Backfill the most
+        // conservative deletion provenance we can infer, so restoring a parent no
+        // longer revives children that were deleted independently afterwards.
+        await BackfillDeletionProvenanceAsync(connection, cancellationToken);
+
         var version = connection.CreateCommand();
-        version.CommandText = "UPDATE app_meta SET value='3' WHERE key='schema_version';";
+        version.CommandText = "UPDATE app_meta SET value='5' WHERE key='schema_version';";
         await version.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+
+    private static async Task BackfillDeletionProvenanceAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE notebooks
+               SET deleted_by='notebook:' || id
+             WHERE is_deleted=1 AND deleted_by IS NULL;
+
+            UPDATE sections
+               SET deleted_by='notebook:' || notebook_id
+             WHERE is_deleted=1 AND deleted_by IS NULL
+               AND notebook_id IN (SELECT id FROM notebooks WHERE is_deleted=1);
+
+            UPDATE pages
+               SET deleted_by=(SELECT s.deleted_by FROM sections s WHERE s.id=pages.section_id)
+             WHERE is_deleted=1 AND deleted_by IS NULL
+               AND section_id IN (SELECT id FROM sections WHERE deleted_by LIKE 'notebook:%');
+
+            UPDATE sections
+               SET deleted_by='section:' || id
+             WHERE is_deleted=1 AND deleted_by IS NULL;
+
+            UPDATE pages
+               SET deleted_by=(SELECT s.deleted_by FROM sections s WHERE s.id=pages.section_id)
+             WHERE is_deleted=1 AND deleted_by IS NULL
+               AND section_id IN (SELECT id FROM sections WHERE is_deleted=1);
+
+            UPDATE pages
+               SET deleted_by='page:' || id
+             WHERE is_deleted=1 AND deleted_by IS NULL;
+            """;
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task CheckpointAsync(CancellationToken cancellationToken = default)
@@ -72,7 +117,7 @@ public sealed class SqliteDataStore
             key TEXT PRIMARY KEY NOT NULL,
             value TEXT NOT NULL
         );
-        INSERT OR IGNORE INTO app_meta(key, value) VALUES('schema_version', '3');
+        INSERT OR IGNORE INTO app_meta(key, value) VALUES('schema_version', '5');
         INSERT OR IGNORE INTO app_meta(key, value) VALUES('clean_shutdown', '1');
 
         CREATE TABLE IF NOT EXISTS notebooks (
@@ -82,6 +127,7 @@ public sealed class SqliteDataStore
             color TEXT NOT NULL DEFAULT '#4F46E5',
             sort_order INTEGER NOT NULL DEFAULT 0,
             is_deleted INTEGER NOT NULL DEFAULT 0,
+            deleted_by TEXT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -94,6 +140,7 @@ public sealed class SqliteDataStore
             color TEXT NOT NULL DEFAULT '#7C6CE7',
             sort_order INTEGER NOT NULL DEFAULT 0,
             is_deleted INTEGER NOT NULL DEFAULT 0,
+            deleted_by TEXT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(notebook_id) REFERENCES notebooks(id)
@@ -108,6 +155,8 @@ public sealed class SqliteDataStore
             sort_order INTEGER NOT NULL DEFAULT 0,
             is_pinned INTEGER NOT NULL DEFAULT 0,
             is_deleted INTEGER NOT NULL DEFAULT 0,
+            deleted_by TEXT NULL,
+            paper_style TEXT NOT NULL DEFAULT 'Blank',
             local_version INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,

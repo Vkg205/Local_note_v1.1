@@ -78,17 +78,23 @@ public sealed class SectionRepository(SqliteDataStore store)
         await using var connection = store.CreateConnection();
         await connection.OpenAsync(cancellationToken);
         using var transaction = connection.BeginTransaction();
+        var now = DateTimeOffset.UtcNow.ToString("O");
+        var scope = $"section:{id}";
+
         var pages = connection.CreateCommand();
         pages.Transaction = transaction;
-        pages.CommandText = "UPDATE pages SET is_deleted=1, updated_at=$now WHERE section_id=$id;";
+        pages.CommandText = "UPDATE pages SET is_deleted=1, deleted_by=$scope, updated_at=$now WHERE section_id=$id AND is_deleted=0;";
         pages.Parameters.AddWithValue("$id", id);
-        pages.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        pages.Parameters.AddWithValue("$scope", scope);
+        pages.Parameters.AddWithValue("$now", now);
         await pages.ExecuteNonQueryAsync(cancellationToken);
+
         var section = connection.CreateCommand();
         section.Transaction = transaction;
-        section.CommandText = "UPDATE sections SET is_deleted=1, updated_at=$now WHERE id=$id;";
+        section.CommandText = "UPDATE sections SET is_deleted=1, deleted_by=$scope, updated_at=$now WHERE id=$id AND is_deleted=0;";
         section.Parameters.AddWithValue("$id", id);
-        section.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        section.Parameters.AddWithValue("$scope", scope);
+        section.Parameters.AddWithValue("$now", now);
         await section.ExecuteNonQueryAsync(cancellationToken);
         transaction.Commit();
     }
