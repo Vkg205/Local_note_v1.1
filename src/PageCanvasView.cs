@@ -1218,7 +1218,6 @@ public sealed class PageCanvasView : UserControl
         // Apply completion at paragraph level. This preserves any intentional inline
         // strikethrough formatting the user already had before checking the todo.
         paragraph.TextDecorations = completed ? TextDecorations.Strikethrough : null;
-        paragraph.Opacity = completed ? 0.62 : 1.0;
     }
 
     private static InlineUIContainer? FindTodoContainer(Paragraph paragraph)
