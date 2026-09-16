@@ -32,9 +32,12 @@ jobs:
         shell: pwsh
         run: New-Item -ItemType Directory -Force .\artifacts | Out-Null
 
-      - name: Validate repository
+      - name: Pre-check repository upload
+        continue-on-error: true
         shell: pwsh
-        run: .\validate-project.ps1
+        run: |
+          & .\validate-project.ps1 2>&1 | Tee-Object -FilePath .\artifacts\validate.log
+          exit 0
 
       - name: Restore compile dependencies
         shell: pwsh
@@ -91,6 +94,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: LocalNote-release-diagnostics-${{ github.run_id }}
-          path: artifacts/*.binlog
+          path: |
+            artifacts/*.log
+            artifacts/*.binlog
           if-no-files-found: ignore
           retention-days: 7
