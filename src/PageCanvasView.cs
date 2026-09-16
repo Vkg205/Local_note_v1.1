@@ -668,9 +668,16 @@ public sealed class PageCanvasView : UserControl
         HookInteractiveDocumentElements(editor, item);
         editor.TextChanged += (_, _) =>
         {
-            editor.UpdateLayout();
-            item.Payload = XamlWriter.Save(editor.Document); item.SearchText = new TextRange(editor.Document.ContentStart, editor.Document.ContentEnd).Text.Trim();
-            QueueObjectSave(item.Id, async () => { if (_contentRepository is not null) await _contentRepository.UpsertAsync(item); DirtyChanged?.Invoke(this, EventArgs.Empty); });
+            // Keep the keystroke path lightweight. UpdateLayout() plus full XAML
+            // serialization on every character can stall the UI, especially together
+            // with auto-height layout. Serialize only after the debounce interval.
+            QueueObjectSave(item.Id, async () =>
+            {
+                item.Payload = XamlWriter.Save(editor.Document);
+                item.SearchText = new TextRange(editor.Document.ContentStart, editor.Document.ContentEnd).Text.Trim();
+                if (_contentRepository is not null) await _contentRepository.UpsertAsync(item);
+                DirtyChanged?.Invoke(this, EventArgs.Empty);
+            });
         };
         return editor;
     }
@@ -1215,8 +1222,9 @@ public sealed class PageCanvasView : UserControl
 
     private static void ApplyTodoCompletionVisual(Paragraph paragraph, bool completed)
     {
-        // Apply completion at paragraph level. This preserves any intentional inline
-        // strikethrough formatting the user already had before checking the todo.
+        // Paragraph is a TextElement/FrameworkContentElement rather than a UIElement,
+        // so it does not expose UIElement.Opacity. Keep the completion visual at the
+        // paragraph TextDecorations level; inline formatting remains intact.
         paragraph.TextDecorations = completed ? TextDecorations.Strikethrough : null;
     }
 

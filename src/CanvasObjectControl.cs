@@ -93,11 +93,10 @@ public sealed class CanvasObjectControl : ContentControl
                 Model.Width = ActualWidth > 0 ? ActualWidth : Width;
                 Model.Height = Math.Max(_minHeight, ActualHeight);
             }
-            // OverlayLayer stretches with the host, but explicitly tracking the actual
-            // size keeps embedded shapes predictable after text auto-grow/shrink and
-            // manual table/image resize.
-            if (ActualWidth > 0) OverlayLayer.Width = ActualWidth;
-            if (ActualHeight > 0) OverlayLayer.Height = ActualHeight;
+            // OverlayLayer is a Grid child and already stretches to the host automatically.
+            // Do NOT copy ActualWidth/ActualHeight back into the child: doing so creates
+            // a measure feedback loop (host grows -> child grows -> host grows again),
+            // which can freeze the UI as soon as a text block changes size while typing.
             HostSizeChanged?.Invoke(this, EventArgs.Empty);
         };
 
